@@ -1,0 +1,18 @@
+# Visual Studio
+.vs/
+*.vcxproj.user
+Debug/
+Release/
+x64/
+x86/
+
+# Arduino build
+EOL/EOL/__vm/
+__vm/
+*.hex
+*.elf
+*.bin
+
+# OS
+Thumbs.db
+.DS_Store
