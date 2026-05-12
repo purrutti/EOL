@@ -27,12 +27,18 @@
     <ClCompile Include="src\CTD.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WebUI.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PiSAMI.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\CTD.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\WebUI.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

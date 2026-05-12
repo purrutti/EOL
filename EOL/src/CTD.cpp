@@ -15,7 +15,6 @@ bool CTD::begin(uint32_t timeoutMs) {
 // ── Non-blocking API ─────────────────────────────────────────────────────────
 
 void CTD::startReading(uint32_t timeoutMs) {
-    flushRx(50);
     sendCmd("tps");
     _line     = "";
     _deadline = millis() + timeoutMs;

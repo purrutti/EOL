@@ -5,20 +5,38 @@
 
 #include "src/PiSAMI.h"
 #include "src/CTD.h"
+#include "src/WebUI.h"
 
 // ── Pin configuration ────────────────────────────────────────────────────────
-#define PISAMI_RELAY_PIN  Q0_2   // powers PiSAMI
-#define CTD_RELAY_PIN     Q0_0   // powers CTD
+#define PISAMI_RELAY_PIN  Q0_2
+#define CTD_RELAY_PIN     Q0_0
 
 #define PISAMI_BAUD  57600
 #define CTD_BAUD      9600
 
-// Interval between full measurement cycles (ms)
 #define MEAS_INTERVAL_MS  (5UL * 60UL * 1000UL)
+
+#define WIFI_SSID  "EOL"
+#define WIFI_PASS  "Eol696969"
 
 // ── Globals ──────────────────────────────────────────────────────────────────
 PiSAMI pisami(Serial2, -1);
 CTD    ctd(Serial2);
+
+// ── State machine ─────────────────────────────────────────────────────────────
+enum State {
+    S_IDLE,
+    S_CTD_SETTLE,    // relay CTD ON, attente 500 ms (millis)
+    S_CTD1,          // wake-up tps, 1 s
+    S_CTD2,          // mesure sans pompe, 30 s
+    S_CTD3,          // mesure avec pompe, 30 s
+    S_PISAMI_SETTLE, // relay PiSAMI ON, attente 1 s (millis)
+    S_PISAMI         // R5A 0 → ACK → donnée, 120 s
+};
+
+State         state     = S_IDLE;
+unsigned long nextCycle = 0;
+unsigned long settleT0  = 0;   // timestamp début settle courant
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
@@ -29,67 +47,77 @@ void setup() {
 
     Serial.begin(115200);
     delay(2000);
-    Serial.println(F("EOL - PiSAMI + CTD"));
+    webLogln("EOL - PiSAMI + CTD");
+
+    webUIBegin(WIFI_SSID, WIFI_PASS);
 
     // ── PiSAMI init ──
-    Serial.print(F("[INIT] PiSAMI... "));
+    webLog("[INIT] PiSAMI... ");
     digitalWrite(CTD_RELAY_PIN,    LOW);
     digitalWrite(PISAMI_RELAY_PIN, HIGH);
     delay(500);
     Serial2.begin(PISAMI_BAUD);
-    if (pisami.begin()) {
-        Serial.println(F("OK"));
-    } else {
-        Serial.println(F("FAILED"));
-    }
+    webLogln(pisami.begin() ? "OK" : "FAILED");
     Serial2.end();
     digitalWrite(PISAMI_RELAY_PIN, LOW);
     delay(200);
 
     // ── CTD init ──
-    Serial.print(F("[INIT] CTD... "));
+    webLog("[INIT] CTD... ");
     digitalWrite(PISAMI_RELAY_PIN, LOW);
     digitalWrite(CTD_RELAY_PIN,    HIGH);
     delay(500);
     Serial2.begin(CTD_BAUD);
     if (ctd.begin()) {
         ctd.sendCmd("getsd");
-        Serial.println(F("OK"));
+        webLogln("OK");
     } else {
-        Serial.println(F("FAILED"));
+        webLogln("FAILED");
     }
     Serial2.end();
     digitalWrite(CTD_RELAY_PIN, LOW);
 }
 
-// ── State machine ────────────────────────────────────────────────────────────
-enum State { S_IDLE, S_CTD1, S_CTD2, S_CTD3, S_PISAMI };
-State         state     = S_IDLE;
-unsigned long nextCycle = 0;
+// ── Drain inline (non-bloquant) ───────────────────────────────────────────────
+static void drainSerial() {
+    while (Serial2.available()) Serial2.read();
+}
 
-// ── Loop (non-blocking) ───────────────────────────────────────────────────────
+// ── Loop (entièrement non-bloquant) ──────────────────────────────────────────
 void loop() {
+    webUIHandle();
+
     CTDRecord    crec;
     PiSAMIRecord prec;
 
     switch (state) {
 
+    // ── Attente du prochain cycle ─────────────────────────────────────────────
     case S_IDLE:
         if (millis() >= nextCycle) {
-            Serial.println(F("\n[CTD] Cycle start"));
+            webLogln("\n[CTD] Cycle start");
             digitalWrite(PISAMI_RELAY_PIN, LOW);
             digitalWrite(CTD_RELAY_PIN,    HIGH);
-            delay(500);
+            settleT0 = millis();
+            state = S_CTD_SETTLE;
+        }
+        break;
+
+    // ── Relay CTD stabilisé ? ─────────────────────────────────────────────────
+    case S_CTD_SETTLE:
+        if (millis() - settleT0 >= 500) {
             Serial2.begin(CTD_BAUD);
+            drainSerial();
             ctd.startReading(1000);
             state = S_CTD1;
         }
         break;
 
+    // ── CTD mesures ──────────────────────────────────────────────────────────
     case S_CTD1:
         if (ctd.poll(crec)) {
-            Serial.print(F("[CTD1] "));
-            Serial.println(crec.ok ? crec.raw : crec.error);
+            webLog("[CTD1] ");
+            webLogln(crec.ok ? crec.raw : crec.error);
             ctd.startReading(30000);
             state = S_CTD2;
         }
@@ -97,8 +125,8 @@ void loop() {
 
     case S_CTD2:
         if (ctd.poll(crec)) {
-            Serial.print(F("[CTD2] "));
-            Serial.println(crec.ok ? crec.raw : crec.error);
+            webLog("[CTD2] ");
+            webLogln(crec.ok ? crec.raw : crec.error);
             ctd.startReading(30000);
             state = S_CTD3;
         }
@@ -106,32 +134,36 @@ void loop() {
 
     case S_CTD3:
         if (ctd.poll(crec)) {
-            Serial.print(F("[CTD3] "));
-            Serial.println(crec.ok ? crec.raw : crec.error);
+            webLog("[CTD3] ");
+            webLogln(crec.ok ? crec.raw : crec.error);
             Serial2.end();
-            digitalWrite(CTD_RELAY_PIN, LOW);
-            delay(200);
-            // ── Switch to PiSAMI ──
-            Serial.println(F("[PiSAMI] Starting (~60 s)..."));
             digitalWrite(CTD_RELAY_PIN,    LOW);
             digitalWrite(PISAMI_RELAY_PIN, HIGH);
-            delay(1000);
+            settleT0 = millis();
+            webLogln("[PiSAMI] Starting (~60 s)...");
+            state = S_PISAMI_SETTLE;
+        }
+        break;
+
+    // ── Relay PiSAMI stabilisé + PiSAMI booté (2500 ms) ? ───────────────────
+    case S_PISAMI_SETTLE:
+        if (millis() - settleT0 >= 3500) {
             Serial2.begin(PISAMI_BAUD);
+            drainSerial();
             pisami.startMeasurement(120000);
             state = S_PISAMI;
         }
         break;
 
+    // ── PiSAMI mesure ────────────────────────────────────────────────────────
     case S_PISAMI:
         if (pisami.poll(prec)) {
-            Serial.print(F("[PiSAMI] "));
-            Serial.println(prec.ok ? prec.raw : prec.error);
+            webLog("[PiSAMI] ");
+            webLogln(prec.ok ? prec.raw : prec.error);
             Serial2.end();
             digitalWrite(PISAMI_RELAY_PIN, LOW);
             nextCycle = millis() + MEAS_INTERVAL_MS;
-            Serial.print(F("[MEAS] Next cycle in "));
-            Serial.print(MEAS_INTERVAL_MS / 60000UL);
-            Serial.println(F(" min"));
+            webLogf("[MEAS] Next cycle in %lu min\n", MEAS_INTERVAL_MS / 60000UL);
             state = S_IDLE;
         }
         break;

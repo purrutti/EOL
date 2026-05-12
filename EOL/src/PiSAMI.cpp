@@ -1,9 +1,11 @@
 #include "PiSAMI.h"
+#include "WebUI.h"
 #include <string.h>
 #include <stdio.h>
 
 PiSAMI::PiSAMI(HardwareSerial& serial, int rtsPin)
-    : _ser(serial), _rtsPin(rtsPin), _active(false), _gotAck(false), _deadline(0) {}
+    : _ser(serial), _rtsPin(rtsPin), _active(false), _phase(PH_F5A),
+      _deadline(0), _phaseT0(0) {}
 
 bool PiSAMI::begin(uint32_t timeoutMs) {
     setRTS(true);
@@ -24,53 +26,96 @@ bool PiSAMI::begin(uint32_t timeoutMs) {
 // ── Non-blocking API ─────────────────────────────────────────────────────────
 
 void PiSAMI::startMeasurement(uint32_t timeoutMs) {
-    flushRx(100);
-
-    sendCmd("Q5A 0");
-    delay(1000);
-    flushRx(100);
-    sendCmd("R5A 0");
-    _line     = "";
-    _gotAck   = false;
-    _deadline = millis() + timeoutMs;
-    _active   = true;
+    while (_ser.available()) _ser.read();
+    sendCmd("F5A");           // silence auto-messages (PiSAMI vient de rebooter)
+    _line      = "";
+    _phase     = PH_F5A;
+    _phaseT0   = millis();
+    _deadline  = millis() + timeoutMs;
+    _active    = true;
 }
 
 bool PiSAMI::poll(PiSAMIRecord& record) {
     if (!_active) return true;
 
+    // ── PH_F5A : attendre ":5" (silence confirmé), timeout 5 s ──────────────
+    if (_phase == PH_F5A) {
+        while (_ser.available()) {
+            char c = (char)_ser.read();
+            if (c == '\n' || c == '\r') {
+                if (_line == ":5") {
+                    // auto-messages silencieux, on envoie Q5A 0
+                    sendCmd("Q5A 0");
+                    _line    = "";
+                    _phaseT0 = millis();
+                    _phase   = PH_WAIT_Q;
+                    return false;
+                }
+                _line = "";
+            } else {
+                _line += c;
+            }
+        }
+        // timeout F5A : pas d'ACK, on tente quand même Q5A 0
+        if (millis() - _phaseT0 >= 5000) {
+            webLogln("[PiSAMI] F5A no ACK, proceeding");
+            sendCmd("Q5A 0");
+            _line    = "";
+            _phaseT0 = millis();
+            _phase   = PH_WAIT_Q;
+        }
+        if (millis() > _deadline) {
+            strlcpy(record.error, "F5A timeout", sizeof(record.error));
+            record.ok = false; _active = false; return true;
+        }
+        return false;
+    }
+
+    // ── PH_WAIT_Q : 1 s après Q5A, puis envoyer R5A 0 ───────────────────────
+    if (_phase == PH_WAIT_Q) {
+        while (_ser.available()) _ser.read();  // jeter écho Q5A
+        if (millis() - _phaseT0 >= 1000) {
+            while (_ser.available()) _ser.read();
+            sendCmd("R5A 0");
+            _line  = "";
+            _phase = PH_WAIT_ACK;
+        }
+        if (millis() > _deadline) {
+            strlcpy(record.error, "Q5A timeout", sizeof(record.error));
+            record.ok = false; _active = false; return true;
+        }
+        return false;
+    }
+
+    // ── PH_WAIT_ACK & PH_WAIT_DATA : lecture ligne par ligne ─────────────────
     while (_ser.available()) {
         char c = (char)_ser.read();
         Serial.print(c);
-        if (c == '\n' || c== '\r') {
+        if (c == '\n' || c == '\r') {
             if (_line.length() > 0) {
-                if (!_gotAck) {
-                    if (_line.indexOf(":5:70A")>=0) {
-                        _gotAck = true;
+                if (_phase == PH_WAIT_ACK) {
+                    if (_line.indexOf(":5:70A") >= 0) {
                         Serial.println("Got ACK...Now measuring");
+                        _phase = PH_WAIT_DATA;
                     }
                     _line = "";
                 } else {
                     _line.toCharArray(record.raw, sizeof(record.raw));
-                    record.ok       = true;
-                    record.error[0] = '\0';
-                    _active         = false;
-                    return true;
+                    record.ok = true; record.error[0] = '\0';
+                    _active   = false; return true;
                 }
             }
-        } else if (c != '\r' && c != '\n') {
+        } else {
             _line += c;
         }
     }
 
     if (millis() > _deadline) {
-        strlcpy(record.error, _gotAck ? "Measurement timeout" : "No command ACK",
+        strlcpy(record.error,
+                _phase == PH_WAIT_ACK ? "No command ACK" : "Measurement timeout",
                 sizeof(record.error));
-        record.ok = false;
-        _active   = false;
-        return true;
+        record.ok = false; _active = false; return true;
     }
-
     return false;
 }
 
