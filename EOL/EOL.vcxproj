@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -83,6 +83,16 @@
     <ClCompile Include="EOL.ino">
       <FileType>CppCode</FileType>
     </ClCompile>
+    <ClCompile Include="src\PiSAMI.cpp">
+      <FileType>CppCode</FileType>
+    </ClCompile>
+    <ClCompile Include="src\CTD.cpp">
+      <FileType>CppCode</FileType>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\PiSAMI.h" />
+    <ClInclude Include="src\CTD.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\arduino folders read me.txt">
