@@ -152,8 +152,8 @@ CTDData CTD::decode(const CTDRecord& record) {
 
     d.temperature  = fields[0];
     d.conductivity = fields[1];   // mS/cm
-    if (n >= 3) d.pressure = fields[2];
-    if (n >= 4) d.oxygen   = fields[3];
+    if (n >= 3) d.oxygen   = fields[2];
+    if (n >= 4) d.pressure = fields[3];
 
     parseDatetime(record.raw, d.date, d.hms);
 
