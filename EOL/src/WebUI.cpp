@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <SD.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -88,6 +89,7 @@ static void handleRoot() {
               "<h1>EOL-PLC21</h1>"
               "<nav>"
                 "<a href='/'>&#8635; Rafraichir</a>"
+                "<a href='/files'>&#128190; Fichiers SD</a>"
                 "<a href='/update' class='up'>&#8593; Mise a jour firmware</a>"
               "</nav>"
               "<span>Uptime: ");
@@ -99,6 +101,96 @@ static void handleRoot() {
     html += F("</pre></body></html>");
 
     _srv.send(200, "text/html", html);
+}
+
+static void handleFiles() {
+    String html;
+    html.reserve(2048);
+    html = F("<!DOCTYPE html><html><head>"
+             "<meta charset='utf-8'>"
+             "<title>EOL &mdash; Fichiers SD</title>"
+             "<style>"
+             "body{font-family:sans-serif;max-width:720px;margin:40px auto;"
+                  "background:#f4f4f4;color:#222}"
+             "h1{color:#333}"
+             "nav{margin-bottom:16px}nav a{color:#0066cc;margin-right:16px}"
+             "table{width:100%;border-collapse:collapse;background:#fff;"
+                   "border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)}"
+             "th{background:#0066cc;color:#fff;padding:10px 14px;text-align:left}"
+             "td{padding:8px 14px;border-bottom:1px solid #eee}"
+             "tr:last-child td{border-bottom:none}"
+             "tr:hover td{background:#f0f6ff}"
+             "a{color:#0066cc;text-decoration:none}"
+             "</style></head><body>"
+             "<h1>&#128190; Fichiers SD &mdash; /data</h1>"
+             "<nav>"
+               "<a href='/'>&#8592; Debug</a>"
+               "<a href='/update'>&#8593; Firmware</a>"
+             "</nav>");
+
+    File dir = SD.open("/data");
+    if (!dir) {
+        html += F("<p style='color:red'>Carte SD indisponible ou /data absent.</p>");
+    } else {
+        html += F("<table>"
+                  "<tr><th>Fichier</th><th>Taille</th><th></th></tr>");
+        bool any = false;
+        File f = dir.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                any = true;
+                const char* full = f.name();
+                const char* slash = strrchr(full, '/');
+                const char* name  = slash ? slash + 1 : full;
+                uint32_t sz = f.size();
+
+                html += F("<tr><td>");
+                html += name;
+                html += F("</td><td>");
+                if (sz >= 1024) { html += sz / 1024; html += F(" Ko"); }
+                else            { html += sz;        html += F(" o"); }
+                html += F("</td><td>"
+                          "<a href='/download?f=");
+                html += name;
+                html += F("'>&#11015; Telecharger</a></td></tr>");
+            }
+            f.close();
+            f = dir.openNextFile();
+        }
+        dir.close();
+        if (!any) {
+            html += F("<tr><td colspan='3' style='color:#888;text-align:center'>"
+                      "Aucun fichier dans /data</td></tr>");
+        }
+        html += F("</table>");
+    }
+    html += F("</body></html>");
+    _srv.send(200, "text/html", html);
+}
+
+static void handleDownload() {
+    if (!_srv.hasArg("f")) {
+        _srv.send(400, "text/plain", "Parametre f manquant");
+        return;
+    }
+    String fname = _srv.arg("f");
+    // Rejeter toute tentative de path traversal
+    if (fname.indexOf("..") >= 0 || fname.indexOf('/') >= 0 ||
+        fname.indexOf('\\') >= 0) {
+        _srv.send(400, "text/plain", "Nom de fichier invalide");
+        return;
+    }
+    String path = "/data/" + fname;
+    File f = SD.open(path.c_str(), FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        _srv.send(404, "text/plain", "Fichier introuvable");
+        return;
+    }
+    _srv.sendHeader("Content-Disposition",
+                    "attachment; filename=\"" + fname + "\"");
+    _srv.streamFile(f, "text/csv");
+    f.close();
 }
 
 static void handleUpdatePage() {
@@ -181,9 +273,11 @@ void webUIBegin(const char* ssid, const char* pass) {
     snprintf(ipStr, sizeof(ipStr), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
     webLogf("[WiFi] AP '%s' sur http://%s\n", ssid, ipStr);
 
-    _srv.on("/",       HTTP_GET,  handleRoot);
-    _srv.on("/update", HTTP_GET,  handleUpdatePage);
-    _srv.on("/update", HTTP_POST, handleUpdatePost, handleUpload);
+    _srv.on("/",         HTTP_GET,  handleRoot);
+    _srv.on("/files",    HTTP_GET,  handleFiles);
+    _srv.on("/download", HTTP_GET,  handleDownload);
+    _srv.on("/update",   HTTP_GET,  handleUpdatePage);
+    _srv.on("/update",   HTTP_POST, handleUpdatePost, handleUpload);
     _srv.onNotFound([]() { _srv.send(404, "text/plain", "Not found"); });
     _srv.begin();
     webLogln("[Web] Serveur demarre port 80");

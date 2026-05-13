@@ -5,7 +5,7 @@
 
 // Broche CS de la carte SD (SPI par défaut : CLK=18 MISO=19 MOSI=23)
 #ifndef SD_CS_PIN
-#  define SD_CS_PIN 5
+#  define SD_CS_PIN PIN_SD_CS
 #endif
 
 // Initialise la carte SD et crée le répertoire /data si absent.
