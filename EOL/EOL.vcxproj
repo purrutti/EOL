@@ -95,12 +95,16 @@
     <ClCompile Include="src\PiSAMI_decode.cpp">
       <FileType>CppCode</FileType>
     </ClCompile>
+    <ClCompile Include="src\SDLogger.cpp">
+      <FileType>CppCode</FileType>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PiSAMI.h" />
     <ClInclude Include="src\PiSAMI_decode.h" />
     <ClInclude Include="src\CTD.h" />
     <ClInclude Include="src\WebUI.h" />
+    <ClInclude Include="src\SDLogger.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\arduino folders read me.txt">

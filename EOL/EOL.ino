@@ -7,6 +7,7 @@
 #include "src/PiSAMI_decode.h"
 #include "src/CTD.h"
 #include "src/WebUI.h"
+#include "src/SDLogger.h"
 
 // ── Pin configuration ────────────────────────────────────────────────────────
 #define PISAMI_RELAY_PIN  Q0_2
@@ -103,6 +104,10 @@ void setup() {
     }
     Serial2.end();
     digitalWrite(CTD_RELAY_PIN, LOW);
+
+    // ── SD card init ──
+    webLog("[INIT] SD card... ");
+    webLogln(sdLoggerBegin() ? "OK" : "FAILED (pas de carte ?)");
 }
 
 // ── Drain inline (non-bloquant) ───────────────────────────────────────────────
@@ -161,6 +166,7 @@ void loop() {
                     webLogf("[CTD2] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
                             cd.temperature, cd.conductivity, cd.salinity);
                 }
+                sdLogCTD(cd);
             }
             ctd.startReading(30000);
             state = S_CTD3;
@@ -178,6 +184,7 @@ void loop() {
                     webLogf("[CTD3] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
                             cd.temperature, cd.conductivity, cd.salinity);
                 }
+                sdLogCTD(cd);
             }
             Serial2.end();
             digitalWrite(CTD_RELAY_PIN,    LOW);
@@ -206,6 +213,7 @@ void loop() {
                 uint8_t err = PiSAMI_pH::parse(String(prec.raw), decoded, gSalinity);
                 if (err == PISAMI_OK) {
                     printPiSAMIDecoded(decoded);
+                    sdLogSAMI(decoded);
                 } else {
                     webLog("[PiSAMI] raw: ");
                     webLogln(prec.raw);

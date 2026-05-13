@@ -14,8 +14,11 @@ struct CTDData {
     float temperature;   // °C           (champ 0)
     float conductivity;  // mS/cm        (champ 1)
     float pressure;      // dbar         (champ 2)
+    float oxygen;        //              (champ 3)
     float salinity;      // PSU calculée
     bool  valid;         // false si parsing échoué ou conductivité <= 0
+    char  date[9];       // "YYYYMMDD\0" extrait de l'horloge CTD
+    char  hms[9];        // "HH:MM:SS\0" extrait de l'horloge CTD
 };
 
 class CTD {

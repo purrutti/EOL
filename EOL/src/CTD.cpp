@@ -58,6 +58,45 @@ bool CTD::isValidLine(const String& s) {
 
 // ── Parsing & salinity ───────────────────────────────────────────────────────
 
+// Extrait "YYYYMMDD" et "HH:MM:SS" depuis le format CTD "DD Mon YYYY, HH:MM:SS"
+static bool parseDatetime(const char* raw, char* dateOut, char* hmsOut) {
+    static const char* MON[12] = {
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec"
+    };
+    for (const char* p = raw; *p; p++) {
+        for (int m = 0; m < 12; m++) {
+            if (strncmp(p, MON[m], 3) != 0) continue;
+            if (p == raw || *(p - 1) != ' ') continue;
+
+            // Jour : chiffres avant l'espace précédant le mois
+            const char* q = p - 2;
+            while (q > raw && (*q == ' ' || *q == ',')) q--;
+            if (!isdigit((uint8_t)*q)) continue;
+            while (q > raw && isdigit((uint8_t)*(q - 1))) q--;
+            int day = atoi(q);
+
+            // Année : après "Mon "
+            const char* yr = p + 4;
+            while (*yr == ' ') yr++;
+            if (!isdigit((uint8_t)*yr)) continue;
+            int year = atoi(yr);
+
+            // Heure : après les chiffres de l'année et ", "
+            const char* t = yr;
+            while (isdigit((uint8_t)*t)) t++;
+            while (*t == ',' || *t == ' ') t++;
+            if (strlen(t) < 8 || t[2] != ':' || t[5] != ':') continue;
+
+            snprintf(dateOut, 9, "%04d%02d%02d", year, m + 1, day);
+            memcpy(hmsOut, t, 8);
+            hmsOut[8] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
 int CTD::parseFields(const char* raw, float* out, int maxFields) {
     int count = 0;
     const char* p = raw;
@@ -101,8 +140,11 @@ CTDData CTD::decode(const CTDRecord& record) {
     d.temperature  = 0.0f;
     d.conductivity = 0.0f;
     d.pressure     = 0.0f;
+    d.oxygen       = 0.0f;
     d.salinity     = 35.0f;
     d.valid        = false;
+    d.date[0]      = '\0';
+    d.hms[0]       = '\0';
 
     float fields[6];
     int n = parseFields(record.raw, fields, 6);
@@ -111,6 +153,9 @@ CTDData CTD::decode(const CTDRecord& record) {
     d.temperature  = fields[0];
     d.conductivity = fields[1];   // mS/cm
     if (n >= 3) d.pressure = fields[2];
+    if (n >= 4) d.oxygen   = fields[3];
+
+    parseDatetime(record.raw, d.date, d.hms);
 
     if (d.conductivity > 0.0f) {
         d.salinity = (float)calculateSalinity(d.temperature,
