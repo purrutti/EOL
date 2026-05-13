@@ -9,6 +9,15 @@ struct CTDRecord {
     char  error[64];
 };
 
+// Valeurs physiques parsées depuis une ligne CTD brute
+struct CTDData {
+    float temperature;   // °C           (champ 0)
+    float conductivity;  // mS/cm        (champ 1)
+    float pressure;      // dbar         (champ 2)
+    float salinity;      // PSU calculée
+    bool  valid;         // false si parsing échoué ou conductivité <= 0
+};
+
 class CTD {
 public:
     CTD(HardwareSerial& serial);
@@ -16,10 +25,13 @@ public:
     bool begin(uint32_t timeoutMs = 5000UL);
     bool sendCmd(const char* cmd);
 
-    // Non-blocking measurement: call startReading() once, then poll() each loop().
-    // poll() returns true when a valid line is received or the timeout expires.
+    // Non-blocking measurement
     void startReading(uint32_t timeoutMs = 30000UL);
     bool poll(CTDRecord& record);
+
+    // Décoder une ligne brute → CTDData + salinité calculée
+    // conductivity attendue en mS/cm (multipliée par 1000 pour μS/cm)
+    static CTDData decode(const CTDRecord& record);
 
 private:
     HardwareSerial& _ser;
@@ -29,4 +41,11 @@ private:
 
     void flushRx(uint32_t ms);
     static bool isValidLine(const String& s);
+
+    // Parse les champs numériques séparés par des virgules
+    static int  parseFields(const char* raw, float* out, int maxFields);
+
+    // Équation de salinité pratique PSS-78
+    static double calculateSalinity(double temperature, double conductivity_uScm,
+                                    double correctionFactor = 1.0);
 };

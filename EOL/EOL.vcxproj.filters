@@ -30,9 +30,15 @@
     <ClCompile Include="src\WebUI.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\PiSAMI_decode.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PiSAMI.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\PiSAMI_decode.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\CTD.h">

@@ -4,6 +4,7 @@
 */
 
 #include "src/PiSAMI.h"
+#include "src/PiSAMI_decode.h"
 #include "src/CTD.h"
 #include "src/WebUI.h"
 
@@ -37,6 +38,32 @@ enum State {
 State         state     = S_IDLE;
 unsigned long nextCycle = 0;
 unsigned long settleT0  = 0;   // timestamp début settle courant
+float         gSalinity = 35.0f;
+
+// ── Affichage du record PiSAMI décodé ────────────────────────────────────────
+static void printPiSAMIDecoded(const PiSAMI_Record& r) {
+    if (!r.valid) {
+        webLogf("[PiSAMI decode] Erreur %d\n", r.errorCode);
+        return;
+    }
+    webLogln("--- PiSAMI-pH ----------------------------------");
+    webLogf("  pH         : %.4f\n",  r.pH);
+    webLogf("  Salinite   : %.2f PSU\n", r.salinity);
+    webLogf("  T interne  : %.3f C\n", r.tempInternal);
+    webLogf("  T externe  : %.3f C\n", r.tempExternal);
+    webLogf("  Batterie   : %.3f V\n", r.batteryV);
+    webLogln("  idx | R434  | S434  | R578  | S578");
+    webLogln("  ----+-------+-------+-------+------");
+    for (uint8_t i = 0; i < PISAMI_N_MEASUREMENTS; i++) {
+        char type = (i < PISAMI_N_BLANKS) ? 'B' : 'M';
+        uint8_t idx = (i < PISAMI_N_BLANKS) ? i : i - PISAMI_N_BLANKS;
+        webLogf("  %c%-2u | %5u | %5u | %5u | %5u\n",
+                type, idx,
+                r.points[i].ref434, r.points[i].sig434,
+                r.points[i].ref578, r.points[i].sig578);
+    }
+    webLogln("------------------------------------------------");
+}
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
@@ -127,6 +154,14 @@ void loop() {
         if (ctd.poll(crec)) {
             webLog("[CTD2] ");
             webLogln(crec.ok ? crec.raw : crec.error);
+            if (crec.ok) {
+                CTDData cd = CTD::decode(crec);
+                if (cd.valid) {
+                    gSalinity = cd.salinity;
+                    webLogf("[CTD2] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
+                            cd.temperature, cd.conductivity, cd.salinity);
+                }
+            }
             ctd.startReading(30000);
             state = S_CTD3;
         }
@@ -136,6 +171,14 @@ void loop() {
         if (ctd.poll(crec)) {
             webLog("[CTD3] ");
             webLogln(crec.ok ? crec.raw : crec.error);
+            if (crec.ok) {
+                CTDData cd = CTD::decode(crec);
+                if (cd.valid) {
+                    gSalinity = cd.salinity;
+                    webLogf("[CTD3] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
+                            cd.temperature, cd.conductivity, cd.salinity);
+                }
+            }
             Serial2.end();
             digitalWrite(CTD_RELAY_PIN,    LOW);
             digitalWrite(PISAMI_RELAY_PIN, HIGH);
@@ -158,8 +201,20 @@ void loop() {
     // ── PiSAMI mesure ────────────────────────────────────────────────────────
     case S_PISAMI:
         if (pisami.poll(prec)) {
-            webLog("[PiSAMI] ");
-            webLogln(prec.ok ? prec.raw : prec.error);
+            if (prec.ok) {
+                PiSAMI_Record decoded;
+                uint8_t err = PiSAMI_pH::parse(String(prec.raw), decoded, gSalinity);
+                if (err == PISAMI_OK) {
+                    printPiSAMIDecoded(decoded);
+                } else {
+                    webLog("[PiSAMI] raw: ");
+                    webLogln(prec.raw);
+                    webLogf("[PiSAMI decode] Erreur %d\n", err);
+                }
+            } else {
+                webLog("[PiSAMI] FAIL: ");
+                webLogln(prec.error);
+            }
             Serial2.end();
             digitalWrite(PISAMI_RELAY_PIN, LOW);
             nextCycle = millis() + MEAS_INTERVAL_MS;
