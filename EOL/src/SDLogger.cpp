@@ -47,6 +47,24 @@ void sdLogCTD(const CTDData& data) {
     f.close();
 }
 
+void sdLogFLNTU(const FLNTUData& data) {
+    if (!_sdOk || !data.valid) return;
+
+    char path[38];
+    snprintf(path, sizeof(path), "/data/%s_EOL_FLNTU.csv", data.date);
+
+    File f;
+    if (!openAppend(f, path, "Date;Time;Chl;ChlRef;NTU;NTURef;Thermistor"))
+        return;
+
+    f.printf("%s;%s;%u;%u;%u;%u;%u\n",
+             data.date, data.hms,
+             data.chl, data.chlRef,
+             data.ntu, data.ntuRef,
+             data.thermistor);
+    f.close();
+}
+
 void sdLogSAMI(const PiSAMI_Record& rec) {
     if (!_sdOk || !rec.valid) return;
 

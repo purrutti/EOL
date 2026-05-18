@@ -1,20 +1,23 @@
 /*
-  EOL.ino - PiSAMI pH + CTD on shared Serial2, relay-multiplexed
+  EOL.ino - PiSAMI pH + CTD + FLNTU on shared Serial2, relay-multiplexed
   Hardware: Industrial Shields ESP32 PLC 21
 */
 
 #include "src/PiSAMI.h"
 #include "src/PiSAMI_decode.h"
 #include "src/CTD.h"
+#include "src/FLNTU.h"
 #include "src/WebUI.h"
 #include "src/SDLogger.h"
 
 // ── Pin configuration ────────────────────────────────────────────────────────
 #define PISAMI_RELAY_PIN  Q0_2
 #define CTD_RELAY_PIN     Q0_0
+#define FLNTU_RELAY_PIN   Q0_1
 
 #define PISAMI_BAUD  57600
 #define CTD_BAUD      9600
+#define FLNTU_BAUD   19200
 
 #define MEAS_INTERVAL_MS  (5UL * 60UL * 1000UL)
 
@@ -24,24 +27,35 @@
 // ── Globals ──────────────────────────────────────────────────────────────────
 PiSAMI pisami(Serial2, -1);
 CTD    ctd(Serial2);
+FLNTU  flntu(Serial2);
 
 // ── State machine ─────────────────────────────────────────────────────────────
 enum State {
     S_IDLE,
-    S_CTD_SETTLE,    // relay CTD ON, attente 500 ms (millis)
+    S_CTD_SETTLE,    // relay CTD ON, attente 500 ms
     S_CTD1,          // wake-up tps, 1 s
     S_CTD2,          // mesure sans pompe, 30 s
     S_CTD3,          // mesure avec pompe, 30 s
-    S_PISAMI_SETTLE, // relay PiSAMI ON, attente 1 s (millis)
-    S_PISAMI         // R5A 0 → ACK → donnée, 120 s
+    S_FLNTU_SETTLE,  // relay FLNTU ON, attente 500 ms
+    S_FLNTU,         // $run → ligne de données, 30 s
+    S_PISAMI_SETTLE, // relay PiSAMI ON, attente 3500 ms
+    S_PISAMI         // F5A → Q5A 0 → R5A 0 → ACK → donnée, 120 s
 };
 
 State         state     = S_IDLE;
 unsigned long nextCycle = 0;
-unsigned long settleT0  = 0;   // timestamp début settle courant
+unsigned long settleT0  = 0;
 float         gSalinity = 35.0f;
 
-// ── Affichage du record PiSAMI décodé ────────────────────────────────────────
+// ── Affichage des records décodés ─────────────────────────────────────────────
+static void printFLNTU(const FLNTUData& d) {
+    webLogln("--- FLNTU -----------------------------------------");
+    webLogf("  Chl signal : %5u cts  (ref %5u)\n", d.chl, d.chlRef);
+    webLogf("  NTU signal : %5u cts  (ref %5u)\n", d.ntu, d.ntuRef);
+    webLogf("  Thermistor : %5u cts\n", d.thermistor);
+    webLogln("---------------------------------------------------");
+}
+
 static void printPiSAMIDecoded(const PiSAMI_Record& r) {
     if (!r.valid) {
         webLogf("[PiSAMI decode] Erreur %d\n", r.errorCode);
@@ -70,18 +84,19 @@ static void printPiSAMIDecoded(const PiSAMI_Record& r) {
 void setup() {
     pinMode(PISAMI_RELAY_PIN, OUTPUT);
     pinMode(CTD_RELAY_PIN,    OUTPUT);
+    pinMode(FLNTU_RELAY_PIN,  OUTPUT);
     digitalWrite(PISAMI_RELAY_PIN, LOW);
     digitalWrite(CTD_RELAY_PIN,    LOW);
+    digitalWrite(FLNTU_RELAY_PIN,  LOW);
 
     Serial.begin(115200);
     delay(2000);
-    webLogln("EOL - PiSAMI + CTD");
+    webLogln("EOL - PiSAMI + CTD + FLNTU");
 
     webUIBegin(WIFI_SSID, WIFI_PASS);
 
     // ── PiSAMI init ──
     webLog("[INIT] PiSAMI... ");
-    digitalWrite(CTD_RELAY_PIN,    LOW);
     digitalWrite(PISAMI_RELAY_PIN, HIGH);
     delay(500);
     Serial2.begin(PISAMI_BAUD);
@@ -92,8 +107,7 @@ void setup() {
 
     // ── CTD init ──
     webLog("[INIT] CTD... ");
-    digitalWrite(PISAMI_RELAY_PIN, LOW);
-    digitalWrite(CTD_RELAY_PIN,    HIGH);
+    digitalWrite(CTD_RELAY_PIN, HIGH);
     delay(500);
     Serial2.begin(CTD_BAUD);
     if (ctd.begin()) {
@@ -104,6 +118,17 @@ void setup() {
     }
     Serial2.end();
     digitalWrite(CTD_RELAY_PIN, LOW);
+    delay(200);
+
+    // ── FLNTU init ──
+    webLog("[INIT] FLNTU... ");
+    digitalWrite(FLNTU_RELAY_PIN, HIGH);
+    delay(500);
+    Serial2.begin(FLNTU_BAUD);
+    flntu.begin();
+    Serial2.end();
+    digitalWrite(FLNTU_RELAY_PIN, LOW);
+    webLogln("OK");
 
     // ── SD card init ──
     webLog("[INIT] SD card... ");
@@ -120,6 +145,7 @@ void loop() {
     webUIHandle();
 
     CTDRecord    crec;
+    FLNTURecord  frec;
     PiSAMIRecord prec;
 
     switch (state) {
@@ -129,6 +155,7 @@ void loop() {
         if (millis() >= nextCycle) {
             webLogln("\n[CTD] Cycle start");
             digitalWrite(PISAMI_RELAY_PIN, LOW);
+            digitalWrite(FLNTU_RELAY_PIN,  LOW);
             digitalWrite(CTD_RELAY_PIN,    HIGH);
             settleT0 = millis();
             state = S_CTD_SETTLE;
@@ -187,7 +214,36 @@ void loop() {
                 sdLogCTD(cd);
             }
             Serial2.end();
-            digitalWrite(CTD_RELAY_PIN,    LOW);
+            digitalWrite(CTD_RELAY_PIN,   LOW);
+            digitalWrite(FLNTU_RELAY_PIN, HIGH);
+            settleT0 = millis();
+            webLogln("[FLNTU] Starting...");
+            state = S_FLNTU_SETTLE;
+        }
+        break;
+
+    // ── Relay FLNTU stabilisé ? ───────────────────────────────────────────────
+    case S_FLNTU_SETTLE:
+        if (millis() - settleT0 >= 500) {
+            Serial2.begin(FLNTU_BAUD);
+            drainSerial();
+            flntu.startReading(30000);
+            state = S_FLNTU;
+        }
+        break;
+
+    // ── FLNTU mesure ─────────────────────────────────────────────────────────
+    case S_FLNTU:
+        if (flntu.poll(frec)) {
+            webLog("[FLNTU] ");
+            webLogln(frec.ok ? frec.raw : frec.error);
+            if (frec.ok) {
+                FLNTUData fd = FLNTU::decode(frec);
+                if (fd.valid) printFLNTU(fd);
+                sdLogFLNTU(fd);
+            }
+            Serial2.end();
+            digitalWrite(FLNTU_RELAY_PIN,  LOW);
             digitalWrite(PISAMI_RELAY_PIN, HIGH);
             settleT0 = millis();
             webLogln("[PiSAMI] Starting (~60 s)...");
@@ -195,7 +251,7 @@ void loop() {
         }
         break;
 
-    // ── Relay PiSAMI stabilisé + PiSAMI booté (2500 ms) ? ───────────────────
+    // ── Relay PiSAMI stabilisé + PiSAMI booté (3500 ms) ? ───────────────────
     case S_PISAMI_SETTLE:
         if (millis() - settleT0 >= 3500) {
             Serial2.begin(PISAMI_BAUD);
