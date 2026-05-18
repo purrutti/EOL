@@ -9,6 +9,7 @@
 #include "src/FLNTU.h"
 #include "src/WebUI.h"
 #include "src/SDLogger.h"
+#include "src/NTPSync.h"
 
 // ── Pin configuration ────────────────────────────────────────────────────────
 #define PISAMI_RELAY_PIN  Q0_2
@@ -133,6 +134,18 @@ void setup() {
     // ── SD card init ──
     webLog("[INIT] SD card... ");
     webLogln(sdLoggerBegin() ? "OK" : "FAILED (pas de carte ?)");
+
+    // ── NTP via Ethernet ──
+    webLog("[INIT] NTP (Ethernet)... ");
+    if (ntpSync(20000)) {
+        struct tm ti;
+        getLocalTime(&ti, 500);
+        char buf[24];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+        webLogf("OK [%s UTC]\n", buf);
+    } else {
+        webLogln("FAILED (Ethernet ou routeur indisponible)");
+    }
 }
 
 // ── Drain inline (non-bloquant) ───────────────────────────────────────────────
@@ -224,7 +237,7 @@ void loop() {
 
     // ── Relay FLNTU stabilisé ? ───────────────────────────────────────────────
     case S_FLNTU_SETTLE:
-        if (millis() - settleT0 >= 500) {
+        if (millis() - settleT0 >= 3500) {
             Serial2.begin(FLNTU_BAUD);
             drainSerial();
             flntu.startReading(30000);

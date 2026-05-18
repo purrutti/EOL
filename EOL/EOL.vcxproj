@@ -101,6 +101,9 @@
     <ClCompile Include="src\FLNTU.cpp">
       <FileType>CppCode</FileType>
     </ClCompile>
+    <ClCompile Include="src\NTPSync.cpp">
+      <FileType>CppCode</FileType>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PiSAMI.h" />
@@ -109,6 +112,7 @@
     <ClInclude Include="src\FLNTU.h" />
     <ClInclude Include="src\WebUI.h" />
     <ClInclude Include="src\SDLogger.h" />
+    <ClInclude Include="src\NTPSync.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="src\arduino folders read me.txt">
