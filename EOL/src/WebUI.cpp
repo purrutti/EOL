@@ -1,5 +1,6 @@
 #include "WebUI.h"
 #include <WiFi.h>
+extern const char* version;
 #include <WebServer.h>
 #include <Update.h>
 #include <SD.h>
@@ -96,7 +97,9 @@ static void handleRoot() {
     html += millis() / 1000;
     html += F(" s &mdash; ");
     html += _count;
-    html += F(" lignes &mdash; auto-refresh 1 s</span><pre>");
+    html += F(" lignes &mdash; auto-refresh 1 s &mdash; ");
+    html += version;
+    html += F("</span><pre>");
     html += log;
     html += F("</pre></body></html>");
 

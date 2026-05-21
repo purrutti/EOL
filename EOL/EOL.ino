@@ -3,6 +3,8 @@
   Hardware: Industrial Shields ESP32 PLC 21
 */
 
+//#include <Ethernet.h>
+//#include <NTPClient.h>
 #include "src/PiSAMI.h"
 #include "src/PiSAMI_decode.h"
 #include "src/CTD.h"
@@ -10,8 +12,13 @@
 #include "src/WebUI.h"
 #include "src/SDLogger.h"
 #include "src/NTPSync.h"
+#include "src/RTCManager.h"
+#include <time.h>
+
+const char* version = "EOL v1.0 - " __DATE__ " " __TIME__;
 
 // ── Pin configuration ────────────────────────────────────────────────────────
+#define GSM_RELAY_PIN     Q0_3
 #define PISAMI_RELAY_PIN  Q0_2
 #define CTD_RELAY_PIN     Q0_0
 #define FLNTU_RELAY_PIN   Q0_1
@@ -20,7 +27,8 @@
 #define CTD_BAUD      9600
 #define FLNTU_BAUD   19200
 
-#define MEAS_INTERVAL_MS  (5UL * 60UL * 1000UL)
+//#define MEAS_INTERVAL_MS  (5UL * 60UL * 1000UL)
+#define MEAS_INTERVAL_MS  (30UL * 60UL * 1000UL)
 
 #define WIFI_SSID  "EOL"
 #define WIFI_PASS  "Eol696969"
@@ -43,7 +51,7 @@ enum State {
     S_PISAMI         // F5A → Q5A 0 → R5A 0 → ACK → donnée, 120 s
 };
 
-State         state     = S_IDLE;
+State         loopState     = S_IDLE;
 unsigned long nextCycle = 0;
 unsigned long settleT0  = 0;
 float         gSalinity = 35.0f;
@@ -135,16 +143,30 @@ void setup() {
     webLog("[INIT] SD card... ");
     webLogln(sdLoggerBegin() ? "OK" : "FAILED (pas de carte ?)");
 
-    // ── NTP via Ethernet ──
+    // ── RTC init ──
+    webLog("[INIT] RTC (DS3231)... ");
+    bool rtcOk = rtcBegin();
+    webLogln(rtcOk ? "OK" : "FAILED");
+
+    // ── NTP via Ethernet (met aussi à jour le RTC si OK) ──
     webLog("[INIT] NTP (Ethernet)... ");
-    if (ntpSync(20000)) {
-        struct tm ti;
-        getLocalTime(&ti, 500);
+    bool ntpOk = ntpSync(20000);
+    if (ntpOk) {
+        time_t now = time(nullptr);
         char buf[24];
-        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmtime(&now));
         webLogf("OK [%s UTC]\n", buf);
+        if (rtcOk) webLogln("[RTC] Mis a jour depuis NTP");
     } else {
         webLogln("FAILED (Ethernet ou routeur indisponible)");
+        if (rtcOk && rtcSyncToSystem()) {
+            time_t now = time(nullptr);
+            char buf[24];
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmtime(&now));
+            webLogf("[RTC] Heure restauree depuis RTC [%s UTC]\n", buf);
+        } else if (rtcOk) {
+            webLogln("[RTC] Heure invalide (RTC jamais sync)");
+        }
     }
 }
 
@@ -161,7 +183,7 @@ void loop() {
     FLNTURecord  frec;
     PiSAMIRecord prec;
 
-    switch (state) {
+    switch (loopState) {
 
     // ── Attente du prochain cycle ─────────────────────────────────────────────
     case S_IDLE:
@@ -171,7 +193,7 @@ void loop() {
             digitalWrite(FLNTU_RELAY_PIN,  LOW);
             digitalWrite(CTD_RELAY_PIN,    HIGH);
             settleT0 = millis();
-            state = S_CTD_SETTLE;
+            loopState = S_CTD_SETTLE;
         }
         break;
 
@@ -181,7 +203,7 @@ void loop() {
             Serial2.begin(CTD_BAUD);
             drainSerial();
             ctd.startReading(1000);
-            state = S_CTD1;
+            loopState = S_CTD1;
         }
         break;
 
@@ -191,7 +213,7 @@ void loop() {
             webLog("[CTD1] ");
             webLogln(crec.ok ? crec.raw : crec.error);
             ctd.startReading(30000);
-            state = S_CTD2;
+            loopState = S_CTD2;
         }
         break;
 
@@ -209,7 +231,7 @@ void loop() {
                 sdLogCTD(cd);
             }
             ctd.startReading(30000);
-            state = S_CTD3;
+            loopState = S_CTD3;
         }
         break;
 
@@ -231,7 +253,7 @@ void loop() {
             digitalWrite(FLNTU_RELAY_PIN, HIGH);
             settleT0 = millis();
             webLogln("[FLNTU] Starting...");
-            state = S_FLNTU_SETTLE;
+            loopState = S_FLNTU_SETTLE;
         }
         break;
 
@@ -241,7 +263,7 @@ void loop() {
             Serial2.begin(FLNTU_BAUD);
             drainSerial();
             flntu.startReading(30000);
-            state = S_FLNTU;
+            loopState = S_FLNTU;
         }
         break;
 
@@ -260,7 +282,7 @@ void loop() {
             digitalWrite(PISAMI_RELAY_PIN, HIGH);
             settleT0 = millis();
             webLogln("[PiSAMI] Starting (~60 s)...");
-            state = S_PISAMI_SETTLE;
+            loopState = S_PISAMI_SETTLE;
         }
         break;
 
@@ -270,7 +292,7 @@ void loop() {
             Serial2.begin(PISAMI_BAUD);
             drainSerial();
             pisami.startMeasurement(120000);
-            state = S_PISAMI;
+            loopState = S_PISAMI;
         }
         break;
 
@@ -296,7 +318,7 @@ void loop() {
             digitalWrite(PISAMI_RELAY_PIN, LOW);
             nextCycle = millis() + MEAS_INTERVAL_MS;
             webLogf("[MEAS] Next cycle in %lu min\n", MEAS_INTERVAL_MS / 60000UL);
-            state = S_IDLE;
+            loopState = S_IDLE;
         }
         break;
     }

@@ -1,0 +1,1 @@
+// Implémentations dans NTPSync.cpp
