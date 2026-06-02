@@ -1,6 +1,6 @@
 # EOL — Autonomous Oceanographic Data Acquisition System
 
-**EOL** (Équipement Océanographique de Long terme) is an autonomous embedded system deployed on a surface buoy. It cyclically interrogates three oceanographic sensors, logs data to SD card, and transmits daily CSV files to a remote FTP server via a 5G modem.
+**EOL** is an autonomous embedded system deployed on a surface buoy. It cyclically interrogates three oceanographic sensors, logs data to SD card, and transmits daily CSV files to a remote FTP server via a 5G modem.
 
 > **Status:** Development → Lab testing (upcoming) → Sea deployment (~1 month)
 
