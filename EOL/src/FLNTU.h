@@ -12,9 +12,9 @@ struct FLNTURecord {
 // Valeurs extraites d'une ligne de mesure FLNTU
 struct FLNTUData {
     uint16_t chl;        // signal fluorescence (ex. 695 nm)
-    uint16_t chlRef;     // référence fluorescence
+    uint16_t chlVal;     // fluorescence
     uint16_t ntu;        // signal turbidité (ex. 700 nm)
-    uint16_t ntuRef;     // référence turbidité
+    uint16_t ntuVal;     // turbidité
     uint16_t thermistor; // comptage thermistance
     char date[9];        // "YYYYMMDD\0"
     char hms[9];         // "HH:MM:SS\0"

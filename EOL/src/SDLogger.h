@@ -23,3 +23,6 @@ void sdLogFLNTU(const FLNTUData& data);
 // Écrit une ligne dans /data/YYYYMMDD_EOL_SAMI.csv
 // Utilise rec.unixTimestamp pour nommer le fichier et horodater la ligne.
 void sdLogSAMI(const PiSAMI_Record& rec);
+
+// Écrit une ligne d'erreur dans /data/errors.log (format: DateTime,Source,Message)
+void sdLogError(const char* source, const char* fmt, ...);

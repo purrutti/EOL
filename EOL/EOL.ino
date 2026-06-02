@@ -11,14 +11,14 @@
 #include "src/FLNTU.h"
 #include "src/WebUI.h"
 #include "src/SDLogger.h"
-#include "src/NTPSync.h"
-#include "src/RTCManager.h"
+#include "src/EthernetManager.h"
 #include <time.h>
 
 const char* version = "EOL v1.0 - " __DATE__ " " __TIME__;
 
 // ── Pin configuration ────────────────────────────────────────────────────────
-#define GSM_RELAY_PIN     Q0_3
+#define GSM_RELAY_PIN     Q0_5
+#define SPARE_RELAY_PIN     Q0_4
 #define PISAMI_RELAY_PIN  Q0_2
 #define CTD_RELAY_PIN     Q0_0
 #define FLNTU_RELAY_PIN   Q0_1
@@ -48,7 +48,10 @@ enum State {
     S_FLNTU_SETTLE,  // relay FLNTU ON, attente 500 ms
     S_FLNTU,         // $run → ligne de données, 30 s
     S_PISAMI_SETTLE, // relay PiSAMI ON, attente 3500 ms
-    S_PISAMI         // F5A → Q5A 0 → R5A 0 → ACK → donnée, 120 s
+    S_PISAMI,        // F5A → Q5A 0 → R5A 0 → ACK → donnée, 120 s
+    S_FTP_GSM_ON,   // relay GSM LOW (modem ON), attente power-up
+    S_FTP_NTP,      // poll NTP → confirme connexion internet, met à jour RTC
+    S_FTP_UPLOAD,   // upload FTP puis relay GSM HIGH (modem OFF)
 };
 
 State         loopState     = S_IDLE;
@@ -56,12 +59,22 @@ unsigned long nextCycle = 0;
 unsigned long settleT0  = 0;
 float         gSalinity = 35.0f;
 
+// ── Scheduling (mesures à HH:00/HH:30, FTP à 00:00/12:00 UTC) ───────────────
+static time_t        _lastMeasTime  = 0;
+static time_t        _lastFtpTime   = 0;
+static unsigned long _ftpRetryAfter = 0;   // backoff après échec FTP (millis)
+static unsigned long _ftpStateT0    = 0;   // timer états FTP
+static unsigned long _ftpNtpNextTry = 0;   // rate-limit poll NTP
+
+#define GSM_SETTLE_MS    5000UL   // power-up modem
+#define NTP_TIMEOUT_MS  360000UL  // timeout attente connexion GSM + NTP
+
 // ── Affichage des records décodés ─────────────────────────────────────────────
 static void printFLNTU(const FLNTUData& d) {
     webLogln("--- FLNTU -----------------------------------------");
-    webLogf("  Chl signal : %5u cts  (ref %5u)\n", d.chl, d.chlRef);
-    webLogf("  NTU signal : %5u cts  (ref %5u)\n", d.ntu, d.ntuRef);
-    webLogf("  Thermistor : %5u cts\n", d.thermistor);
+    webLogf("  Chl signal : signal: %5u  (wavelength %5u)\n",  d.chlVal, d.chl);
+    webLogf("  NTU signal : signal: %5u  (wavelength %5u)\n", d.ntuVal, d.ntu);
+    webLogf("  Thermistor : %5u\n", d.thermistor);
     webLogln("---------------------------------------------------");
 }
 
@@ -91,9 +104,11 @@ static void printPiSAMIDecoded(const PiSAMI_Record& r) {
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
+    pinMode(GSM_RELAY_PIN,    OUTPUT);
     pinMode(PISAMI_RELAY_PIN, OUTPUT);
     pinMode(CTD_RELAY_PIN,    OUTPUT);
     pinMode(FLNTU_RELAY_PIN,  OUTPUT);
+    digitalWrite(GSM_RELAY_PIN,    HIGH);  // modem GSM éteint au démarrage
     digitalWrite(PISAMI_RELAY_PIN, LOW);
     digitalWrite(CTD_RELAY_PIN,    LOW);
     digitalWrite(FLNTU_RELAY_PIN,  LOW);
@@ -148,9 +163,9 @@ void setup() {
     bool rtcOk = rtcBegin();
     webLogln(rtcOk ? "OK" : "FAILED");
 
-    // ── NTP via Ethernet (met aussi à jour le RTC si OK) ──
-    webLog("[INIT] NTP (Ethernet)... ");
-    bool ntpOk = ntpSync(20000);
+    // ── Ethernet : IP fixe + NTP + RTC ──
+    webLog("[INIT] Ethernet + NTP... ");
+    bool ntpOk = ethernetBegin(20000);
     if (ntpOk) {
         time_t now = time(nullptr);
         char buf[24];
@@ -168,11 +183,44 @@ void setup() {
             webLogln("[RTC] Heure invalide (RTC jamais sync)");
         }
     }
+
+    // ── Serveur web Ethernet (démarre si DHCP a fourni une IP) ──
+    webUIEthernetBegin();
 }
 
 // ── Drain inline (non-bloquant) ───────────────────────────────────────────────
 static void drainSerial() {
     while (Serial2.available()) Serial2.read();
+}
+
+// ── Scheduling helpers ────────────────────────────────────────────────────────
+// Dernier créneau mesure écoulé (HH:00 ou HH:30 UTC).
+static time_t lastMeasSlot() {
+    time_t now = time(nullptr);
+    time_t secsInHour = now % 3600UL;
+    time_t hourStart  = now - secsInHour;
+    return (secsInHour >= 1800UL) ? hourStart + 1800UL : hourStart;
+}
+
+// Dernier créneau FTP écoulé (00:00 ou 12:00 UTC).
+static time_t lastFtpSlot() {
+    time_t now = time(nullptr);
+    time_t secsInDay = now % 86400UL;
+    time_t dayStart  = now - secsInDay;
+    return (secsInDay >= 43200UL) ? dayStart + 43200UL : dayStart;
+}
+
+static bool measDue() {
+    time_t now = time(nullptr);
+    if (now < 1000000000UL) return millis() >= nextCycle;  // fallback sans horloge
+    return _lastMeasTime < lastMeasSlot();
+}
+
+static bool ftpDue() {
+    time_t now = time(nullptr);
+    if (now < 1000000000UL) return false;
+    if (millis() < _ftpRetryAfter) return false;
+    return _lastFtpTime < lastFtpSlot();
 }
 
 // ── Loop (entièrement non-bloquant) ──────────────────────────────────────────
@@ -187,8 +235,19 @@ void loop() {
 
     // ── Attente du prochain cycle ─────────────────────────────────────────────
     case S_IDLE:
-        if (millis() >= nextCycle) {
-            webLogln("\n[CTD] Cycle start");
+        if (ftpDue()) {
+            webLogln("[FTP] Creneau d'envoi - activation modem GSM...");
+            digitalWrite(GSM_RELAY_PIN, LOW);  // modem ON
+            _ftpStateT0 = millis();
+            loopState = S_FTP_GSM_ON;
+            break;
+        }
+        if (measDue()) {
+            _lastMeasTime = lastMeasSlot();
+            nextCycle = millis() + MEAS_INTERVAL_MS;  // fallback si perte d'horloge
+            time_t now = time(nullptr);
+            struct tm* g = gmtime(&now);
+            webLogf("\n[CTD] Cycle %02d:%02d UTC\n", g->tm_hour, g->tm_min);
             digitalWrite(PISAMI_RELAY_PIN, LOW);
             digitalWrite(FLNTU_RELAY_PIN,  LOW);
             digitalWrite(CTD_RELAY_PIN,    HIGH);
@@ -227,8 +286,12 @@ void loop() {
                     gSalinity = cd.salinity;
                     webLogf("[CTD2] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
                             cd.temperature, cd.conductivity, cd.salinity);
+                } else {
+                    sdLogError("CTD", "decode echec: %s", crec.raw);
                 }
                 sdLogCTD(cd);
+            } else {
+                sdLogError("CTD", crec.error);
             }
             ctd.startReading(30000);
             loopState = S_CTD3;
@@ -245,8 +308,12 @@ void loop() {
                     gSalinity = cd.salinity;
                     webLogf("[CTD3] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
                             cd.temperature, cd.conductivity, cd.salinity);
+                } else {
+                    sdLogError("CTD", "decode echec: %s", crec.raw);
                 }
                 sdLogCTD(cd);
+            } else {
+                sdLogError("CTD", crec.error);
             }
             Serial2.end();
             digitalWrite(CTD_RELAY_PIN,   LOW);
@@ -275,7 +342,10 @@ void loop() {
             if (frec.ok) {
                 FLNTUData fd = FLNTU::decode(frec);
                 if (fd.valid) printFLNTU(fd);
+                else          sdLogError("FLNTU", "decode echec: %s", frec.raw);
                 sdLogFLNTU(fd);
+            } else {
+                sdLogError("FLNTU", frec.error);
             }
             Serial2.end();
             digitalWrite(FLNTU_RELAY_PIN,  LOW);
@@ -309,17 +379,69 @@ void loop() {
                     webLog("[PiSAMI] raw: ");
                     webLogln(prec.raw);
                     webLogf("[PiSAMI decode] Erreur %d\n", err);
+                    sdLogError("PISAMI", "decode erreur %d", err);
                 }
             } else {
                 webLog("[PiSAMI] FAIL: ");
                 webLogln(prec.error);
+                sdLogError("PISAMI", prec.error);
             }
             Serial2.end();
             digitalWrite(PISAMI_RELAY_PIN, LOW);
-            nextCycle = millis() + MEAS_INTERVAL_MS;
-            webLogf("[MEAS] Next cycle in %lu min\n", MEAS_INTERVAL_MS / 60000UL);
+            nextCycle = millis() + MEAS_INTERVAL_MS;  // fallback si perte d'horloge
             loopState = S_IDLE;
         }
         break;
+    // ── FTP : power-up modem GSM ─────────────────────────────────────────────
+    case S_FTP_GSM_ON:
+        if (millis() - _ftpStateT0 >= GSM_SETTLE_MS) {
+            webLogln("[FTP] Modem GSM actif - attente NTP...");
+            ntpSessionBegin();
+            _ftpNtpNextTry = 0;
+            _ftpStateT0    = millis();
+            loopState = S_FTP_NTP;
+        }
+        break;
+
+    // ── FTP : attente NTP (confirme connexion internet + sync RTC) ────────────
+    case S_FTP_NTP:
+        if (millis() >= _ftpNtpNextTry) {
+            _ftpNtpNextTry = millis() + 5000;
+            if (ntpSessionPoll()) {
+                ntpSessionEnd();
+                time_t n = time(nullptr);
+                char buf[24];
+                strftime(buf, sizeof(buf), "%d %b %Y, %H:%M:%S", gmtime(&n));
+                webLogf("[FTP] NTP OK [%s UTC] - debut upload\n", buf);
+                loopState = S_FTP_UPLOAD;
+                break;
+            }
+        }
+        if (millis() - _ftpStateT0 >= NTP_TIMEOUT_MS) {
+            ntpSessionEnd();
+            webLogln("[FTP] Timeout NTP - modem GSM eteint");
+            sdLogError("FTP", "timeout NTP - upload annule");
+            _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
+            digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF
+            loopState = S_IDLE;
+        }
+        break;
+
+    // ── FTP : upload puis extinction modem ────────────────────────────────────
+    case S_FTP_UPLOAD: {
+        uint8_t sent = ftpUploadDaily();
+        if (sent > 0) {
+            _lastFtpTime = time(nullptr);
+            webLogf("[FTP] %u/3 fichiers envoyes - modem GSM eteint\n", sent);
+        } else {
+            webLogln("[FTP] Echec upload - retry dans 15 min");
+            sdLogError("FTP", "upload echoue (0/3)");
+            _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
+        }
+        digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF dans tous les cas
+        loopState = S_IDLE;
+        break;
+    }
+
     }
 }

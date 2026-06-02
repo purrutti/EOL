@@ -64,7 +64,7 @@ bool FLNTU::isDataLine(const String& s) {
 
 FLNTUData FLNTU::decode(const FLNTURecord& record) {
     FLNTUData d;
-    d.chl = d.chlRef = d.ntu = d.ntuRef = d.thermistor = 0;
+    d.chl = d.chlVal = d.ntu = d.ntuVal = d.thermistor = 0;
     d.date[0] = d.hms[0] = '\0';
     d.valid = false;
 
@@ -82,9 +82,9 @@ FLNTUData FLNTU::decode(const FLNTURecord& record) {
     if (n < 11) return d;
 
     d.chl        = (uint16_t)f1;
-    d.chlRef     = (uint16_t)f2;
+    d.chlVal     = (uint16_t)f2;
     d.ntu        = (uint16_t)f3;
-    d.ntuRef     = (uint16_t)f4;
+    d.ntuVal     = (uint16_t)f4;
     d.thermistor = (uint16_t)f5;
 
     snprintf(d.date, sizeof(d.date), "%04d%02d%02d", 2000 + yy, mm, dd);

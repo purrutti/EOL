@@ -4,7 +4,10 @@
 // Start WiFi AP + web server (call once in setup)
 void webUIBegin(const char* ssid, const char* pass);
 
-// Service pending HTTP requests (call every loop iteration)
+// Start Ethernet web server (call after ntpSync, once DHCP IP is known)
+void webUIEthernetBegin();
+
+// Service pending HTTP requests — WiFi + Ethernet (call every loop iteration)
 void webUIHandle();
 
 // Log helpers — mirror to Serial and to the web debug page
