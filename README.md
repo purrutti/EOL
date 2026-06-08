@@ -17,7 +17,7 @@
 | Connectivity | W5500 Ethernet + Teltonika TRB500 5G modem |
 | Time sync | NTP via 5G → pool.ntp.org, DS3231 RTC backup |
 | Measurement schedule | Every 30 min at **HH:00** and **HH:30** UTC |
-| FTP upload | Daily at **00:00** and **12:00** UTC |
+| FTP upload | Daily at **00:00 UTC** (previous day's files) |
 | FTP server | `oceane.obs-vlfr.fr` |
 | Web UI | WiFi AP `EOL` / `Eol696969` or Ethernet `192.168.2.231` |
 
@@ -102,7 +102,7 @@ S_IDLE
                                   └─► S_IDLE
 ```
 
-## FTP Upload Cycle (00:00 and 12:00 UTC)
+## FTP Upload Cycle (00:00 UTC — previous day's files)
 
 ```
 S_IDLE ─► S_FTP_GSM_ON  relay ON, 5 s power-up
@@ -110,7 +110,7 @@ S_IDLE ─► S_FTP_GSM_ON  relay ON, 5 s power-up
                └─► S_FTP_UPLOAD  ftpUploadDaily() → relay OFF
                    └─► S_IDLE
 ```
-Retry on failure: 15 min backoff.
+Uploads `YYYYMMDD_EOL_*.csv` for the previous day. Retry on failure: 15 min backoff.
 
 ---
 
