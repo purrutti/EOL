@@ -214,8 +214,9 @@ uint8_t ftpUploadDaily() {
         webLogln("[FTP] Heure invalide, upload annule");
         return 0;
     }
+    time_t yesterday = now - 86400UL;
     char date[9];
-    strftime(date, sizeof(date), "%Y%m%d", gmtime(&now));
+    strftime(date, sizeof(date), "%Y%m%d", gmtime(&yesterday));
 
     // Résolution DNS une seule fois — évite ctrl.remoteIP() qui peut être 0 sur ESP32
     IPAddress serverIP;

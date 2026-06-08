@@ -202,12 +202,10 @@ static time_t lastMeasSlot() {
     return (secsInHour >= 1800UL) ? hourStart + 1800UL : hourStart;
 }
 
-// Dernier créneau FTP écoulé (00:00 ou 12:00 UTC).
+// Dernier créneau FTP écoulé (00:00 UTC uniquement, une fois par jour).
 static time_t lastFtpSlot() {
     time_t now = time(nullptr);
-    time_t secsInDay = now % 86400UL;
-    time_t dayStart  = now - secsInDay;
-    return (secsInDay >= 43200UL) ? dayStart + 43200UL : dayStart;
+    return now - (now % 86400UL);  // minuit UTC du jour courant
 }
 
 static bool measDue() {
@@ -289,7 +287,7 @@ void loop() {
                 } else {
                     sdLogError("CTD", "decode echec: %s", crec.raw);
                 }
-                sdLogCTD(cd);
+                //sdLogCTD(cd);
             } else {
                 sdLogError("CTD", crec.error);
             }
@@ -422,7 +420,7 @@ void loop() {
             webLogln("[FTP] Timeout NTP - modem GSM eteint");
             sdLogError("FTP", "timeout NTP - upload annule");
             _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
-            digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF
+            //digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF
             loopState = S_IDLE;
         }
         break;
@@ -433,12 +431,13 @@ void loop() {
         if (sent > 0) {
             _lastFtpTime = time(nullptr);
             webLogf("[FTP] %u/3 fichiers envoyes - modem GSM eteint\n", sent);
+            digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF 
         } else {
             webLogln("[FTP] Echec upload - retry dans 15 min");
             sdLogError("FTP", "upload echoue (0/3)");
             _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
         }
-        digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF dans tous les cas
+        
         loopState = S_IDLE;
         break;
     }
