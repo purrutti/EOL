@@ -51,8 +51,10 @@ void sdLogCTD(const CTDData& data) {
     snprintf(path, sizeof(path), "/data/%s_EOL_CTD.csv", dateStr);
 
     File f;
-    if (!openAppend(f, path, "Temperature,Conductivity,Oxygen,Salinity,Date,Time"))
+    if (!openAppend(f, path, "Temperature,Conductivity,Oxygen,Salinity,Date,Time")) {
+        sdLogError("SD", "impossible d'ouvrir %s", path);
         return;
+    }
 
     f.printf("%.4f,%.5f,%.3f,%.4f,%s\n",
              data.temperature, data.conductivity,
@@ -70,8 +72,10 @@ void sdLogFLNTU(const FLNTUData& data) {
     snprintf(path, sizeof(path), "/data/%s_EOL_FLNTU.csv", dateStr);
 
     File f;
-    if (!openAppend(f, path, "Date;Time;Chl_WL;Chl_Val;NTU_WL;NTU_Val;Thermistor"))
+    if (!openAppend(f, path, "Date;Time;Chl_WL;Chl_Val;NTU_WL;NTU_Val;Thermistor")) {
+        sdLogError("SD", "impossible d'ouvrir %s", path);
         return;
+    }
 
     f.printf("%s;%s;%u;%u;%u;%u;%u\n",
              dateStr, hmsStr,
@@ -92,8 +96,10 @@ void sdLogSAMI(const PiSAMI_Record& rec) {
 
     File f;
     if (!openAppend(f, path,
-                    "Date;Time;Temperature init;Temperature end;ref PSU;pH;Battery"))
+                    "Date;Time;Temperature init;Temperature end;ref PSU;pH;Battery")) {
+        sdLogError("SD", "impossible d'ouvrir %s", path);
         return;
+    }
 
     float tInit = PiSAMI_pH::adcToTemp(rec.tInitRaw);
     float tEnd  = PiSAMI_pH::adcToTemp(rec.tFinalRaw);
