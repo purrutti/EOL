@@ -13,8 +13,26 @@
 #include "src/SDLogger.h"
 #include "src/EthernetManager.h"
 #include <time.h>
+#include <esp_system.h>
 
 const char* version = "EOL v1.0 - " __DATE__ " " __TIME__;
+
+// ── Raison du redemarrage (diagnostic des trous de mesure) ──────────────────
+static const char* resetReasonStr(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "reset externe";
+        case ESP_RST_SW:        return "reset logiciel";
+        case ESP_RST_PANIC:     return "panic/exception";
+        case ESP_RST_INT_WDT:   return "watchdog interruption";
+        case ESP_RST_TASK_WDT:  return "watchdog tache";
+        case ESP_RST_WDT:       return "watchdog (autre)";
+        case ESP_RST_DEEPSLEEP: return "reveil deep-sleep";
+        case ESP_RST_BROWNOUT:  return "brownout (sous-tension)";
+        case ESP_RST_SDIO:      return "reset SDIO";
+        default:                return "inconnue";
+    }
+}
 
 // ── Pin configuration ────────────────────────────────────────────────────────
 #define GSM_RELAY_PIN     Q0_5
@@ -57,7 +75,12 @@ enum State {
 State         loopState     = S_IDLE;
 unsigned long nextCycle = 0;
 unsigned long settleT0  = 0;
-float         gSalinity = 35.0f;
+#define DEFAULT_SALINITY 35.0f
+float         gSalinity = DEFAULT_SALINITY;
+
+// Retries CTD en cas de trame illisible (caracteres parasites sur la liaison RS232)
+#define CTD_MAX_RETRIES 5
+static uint8_t ctdRetryCount = 0;
 
 // ── Scheduling (mesures à HH:00/HH:30, FTP à 00:00/12:00 UTC) ───────────────
 static time_t        _lastMeasTime  = 0;
@@ -68,6 +91,7 @@ static unsigned long _ftpNtpNextTry = 0;   // rate-limit poll NTP
 
 #define GSM_SETTLE_MS    5000UL   // power-up modem
 #define NTP_TIMEOUT_MS  360000UL  // timeout attente connexion GSM + NTP
+//#define NTP_TIMEOUT_MS  30000UL  // timeout attente connexion GSM + NTP
 
 // ── Affichage des records décodés ─────────────────────────────────────────────
 static void printFLNTU(const FLNTUData& d) {
@@ -157,6 +181,7 @@ void setup() {
     // ── SD card init ──
     webLog("[INIT] SD card... ");
     webLogln(sdLoggerBegin() ? "OK" : "FAILED (pas de carte ?)");
+    sdLogError("BOOT", "redemarrage - raison: %s", resetReasonStr(esp_reset_reason()));
 
     // ── RTC init ──
     webLog("[INIT] RTC (DS3231)... ");
@@ -243,6 +268,7 @@ void loop() {
         if (measDue()) {
             _lastMeasTime = lastMeasSlot();
             nextCycle = millis() + MEAS_INTERVAL_MS;  // fallback si perte d'horloge
+            gSalinity = DEFAULT_SALINITY;              // reset, mis a jour si CTD valide
             time_t now = time(nullptr);
             struct tm* g = gmtime(&now);
             webLogf("\n[CTD] Cycle %02d:%02d UTC\n", g->tm_hour, g->tm_min);
@@ -259,6 +285,7 @@ void loop() {
         if (millis() - settleT0 >= 500) {
             Serial2.begin(CTD_BAUD);
             drainSerial();
+            ctdRetryCount = 0;
             ctd.startReading(1000);
             loopState = S_CTD1;
         }
@@ -278,19 +305,29 @@ void loop() {
         if (ctd.poll(crec)) {
             webLog("[CTD2] ");
             webLogln(crec.ok ? crec.raw : crec.error);
-            if (crec.ok) {
-                CTDData cd = CTD::decode(crec);
-                if (cd.valid) {
-                    gSalinity = cd.salinity;
-                    webLogf("[CTD2] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
-                            cd.temperature, cd.conductivity, cd.salinity);
-                } else {
-                    sdLogError("CTD", "decode echec: %s", crec.raw);
-                }
-                //sdLogCTD(cd);
+            CTDData cd;
+            cd.valid = false;
+            if (crec.ok) cd = CTD::decode(crec);
+            if (!cd.valid && ctdRetryCount < CTD_MAX_RETRIES) {
+                ctdRetryCount++;
+                webLogf("[CTD2] Trame invalide - nouvelle mesure (%u/%u)\n",
+                        ctdRetryCount, CTD_MAX_RETRIES);
+                ctd.startReading(30000);
+                break;
+            }
+            ctdRetryCount = 0;
+            if (cd.valid) {
+                gSalinity = cd.salinity;
+                webLogf("[CTD2] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
+                        cd.temperature, cd.conductivity, cd.salinity);
+            } else if (crec.ok) {
+                sdLogError("CTD", "decode echec: %s", crec.raw);
+                webLogf("[CTD2] Decode invalide - salinite par defaut %.1f PSU\n", DEFAULT_SALINITY);
             } else {
                 sdLogError("CTD", crec.error);
+                webLogf("[CTD2] Echec mesure - salinite par defaut %.1f PSU\n", DEFAULT_SALINITY);
             }
+            //sdLogCTD(cd);
             ctd.startReading(30000);
             loopState = S_CTD3;
         }
@@ -300,19 +337,29 @@ void loop() {
         if (ctd.poll(crec)) {
             webLog("[CTD3] ");
             webLogln(crec.ok ? crec.raw : crec.error);
-            if (crec.ok) {
-                CTDData cd = CTD::decode(crec);
-                if (cd.valid) {
-                    gSalinity = cd.salinity;
-                    webLogf("[CTD3] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
-                            cd.temperature, cd.conductivity, cd.salinity);
-                } else {
-                    sdLogError("CTD", "decode echec: %s", crec.raw);
-                }
-                sdLogCTD(cd);
+            CTDData cd;
+            cd.valid = false;
+            if (crec.ok) cd = CTD::decode(crec);
+            if (!cd.valid && ctdRetryCount < CTD_MAX_RETRIES) {
+                ctdRetryCount++;
+                webLogf("[CTD3] Trame invalide - nouvelle mesure (%u/%u)\n",
+                        ctdRetryCount, CTD_MAX_RETRIES);
+                ctd.startReading(30000);
+                break;
+            }
+            ctdRetryCount = 0;
+            if (cd.valid) {
+                gSalinity = cd.salinity;
+                webLogf("[CTD3] T=%.2f C  Cond=%.3f mS/cm  Sal=%.2f PSU\n",
+                        cd.temperature, cd.conductivity, cd.salinity);
+            } else if (crec.ok) {
+                sdLogError("CTD", "decode echec: %s", crec.raw);
+                webLogf("[CTD3] Decode invalide - salinite par defaut %.1f PSU\n", DEFAULT_SALINITY);
             } else {
                 sdLogError("CTD", crec.error);
+                webLogf("[CTD3] Echec mesure - salinite par defaut %.1f PSU\n", DEFAULT_SALINITY);
             }
+            sdLogCTD(cd);
             Serial2.end();
             digitalWrite(CTD_RELAY_PIN,   LOW);
             digitalWrite(FLNTU_RELAY_PIN, HIGH);
@@ -368,7 +415,10 @@ void loop() {
     case S_PISAMI:
         if (pisami.poll(prec)) {
             if (prec.ok) {
+                sdLogSAMIRaw(prec.raw);
                 PiSAMI_Record decoded;
+                webLogf("[PiSAMI] Calcul pH avec salinite = %.2f PSU%s\n",
+                        gSalinity, (gSalinity == DEFAULT_SALINITY) ? " (defaut)" : " (CTD)");
                 uint8_t err = PiSAMI_pH::parse(String(prec.raw), decoded, gSalinity);
                 if (err == PISAMI_OK) {
                     printPiSAMIDecoded(decoded);
@@ -441,6 +491,8 @@ void loop() {
         loopState = S_IDLE;
         break;
     }
+    default: loopState = S_IDLE;
+        break;
 
     }
 }

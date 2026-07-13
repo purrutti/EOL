@@ -81,7 +81,7 @@ void PiSAMI_pH::calcEpsilons(double t_C, double& e1, double& e2, double& e3) {
     // Absorptivités à 434 nm (forme HI-) et 578 nm (forme I2-)
     double a434 = 18432.0 + 23.8680  * (25.0 - t_C);
     double a578 = 120.0;
-    double b434 = 24198.0 - 7.967   * (25.0 - t_C);   // approximation linéaire
+    double b434 = 2419.0 - 7.967   * (25.0 - t_C);    // calibration capteur (Eb434=2419 @ 25 C)
     double b578 = 40910.0 + 104.5411 * (25.0 - t_C);
 
     // e1 = a578/a434,  e2 = b578/a434,  e3 = b434/a434
@@ -146,7 +146,9 @@ float PiSAMI_pH::calculatePH(const PiSAMI_Point* points, uint8_t nPoints,
         // pH ponctuel via Henderson-Hasselbalch
         double denom_pH = e2 - R * e3;
         if (fabs(denom_pH) < 1e-12) continue;
-        double pH_point = pKa + log10((R - e1) / denom_pH);
+        double ratio = (R - e1) / denom_pH;
+        if (ratio <= 0.0) continue; // hors domaine de log10 -> point invalide
+        double pH_point = pKa + log10(ratio);
 
         // Concentration indicateur proportionnelle à A434 + A578
         double conc = A434 + A578;

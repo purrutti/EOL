@@ -90,11 +90,12 @@ bool ethernetBegin(uint32_t timeoutMs) {
 }
 
 // ── FTP upload ────────────────────────────────────────────────────────────────
-#define FTP_HOST    "oceane.obs-vlfr.fr"
-#define FTP_PORT    21
-#define FTP_USER    "leo"
-#define FTP_PASS    "leocnrs"
-#define FTP_TOUT_MS 15000UL
+#define FTP_HOST       "oceane.obs-vlfr.fr"
+#define FTP_PORT       21
+#define FTP_USER       "leo"
+#define FTP_PASS       "leocnrs"
+#define FTP_TOUT_MS    15000UL
+#define FTP_NDAYS_CHECK 10
 
 extern void webLogf(const char* fmt, ...);
 extern void webLogln(const char* msg);
@@ -135,11 +136,13 @@ static bool parsePasv(const String& line, IPAddress& ip, uint16_t& port) {
     return true;
 }
 
-static bool ftpUploadFile(EthernetClient& ctrl, const char* fname,
-                          const char* remoteDir, IPAddress serverIP) {
-    String sdPath = String("/data/") + fname;
+// Envoie le fichier local /data/<localName> sous le nom <remoteName> dans
+// remoteDir. Les deux noms diffèrent pour errors.log (daté à l'upload).
+static bool ftpUploadFileAs(EthernetClient& ctrl, const char* localName, const char* remoteName,
+                            const char* remoteDir, IPAddress serverIP) {
+    String sdPath = String("/data/") + localName;
     if (!SD.exists(sdPath.c_str())) {
-        webLogf("[FTP] %s absent, ignore\n", fname);
+        webLogf("[FTP] %s absent, ignore\n", localName);
         return false;
     }
     if (!ftpCmd(ctrl, String("CWD ") + remoteDir, 250)) {
@@ -153,13 +156,13 @@ static bool ftpUploadFile(EthernetClient& ctrl, const char* fname,
     String pasvLine;
     if (ftpReadCode(ctrl, &pasvLine) != 227) {
         webLogln("[FTP] PASV echec");
-        sdLogError("FTP", "PASV echec pour %s", fname);
+        sdLogError("FTP", "PASV echec pour %s", remoteName);
         return false;
     }
     IPAddress dataIP; uint16_t dataPort;
     if (!parsePasv(pasvLine, dataIP, dataPort)) {
         webLogln("[FTP] PASV parse echec");
-        sdLogError("FTP", "PASV parse echec pour %s", fname);
+        sdLogError("FTP", "PASV parse echec pour %s", remoteName);
         return false;
     }
     // serverIP est résolu une fois en amont (DNS) — ignore l'IP du PASV (NAT)
@@ -170,15 +173,15 @@ static bool ftpUploadFile(EthernetClient& ctrl, const char* fname,
     if (!data.connect(serverIP, dataPort)) {
         webLogln("[FTP] connexion data echec");
         sdLogError("FTP", "connexion data %d.%d.%d.%d:%u echec (%s)",
-                   serverIP[0], serverIP[1], serverIP[2], serverIP[3], dataPort, fname);
+                   serverIP[0], serverIP[1], serverIP[2], serverIP[3], dataPort, remoteName);
         return false;
     }
 
-    ctrl.print("STOR "); ctrl.print(fname); ctrl.print("\r\n");
+    ctrl.print("STOR "); ctrl.print(remoteName); ctrl.print("\r\n");
     if (ftpReadCode(ctrl) != 150) {
         data.stop();
-        webLogf("[FTP] STOR %s echec\n", fname);
-        sdLogError("FTP", "STOR %s echec", fname);
+        webLogf("[FTP] STOR %s echec\n", remoteName);
+        sdLogError("FTP", "STOR %s echec", remoteName);
         return false;
     }
 
@@ -195,18 +198,60 @@ static bool ftpUploadFile(EthernetClient& ctrl, const char* fname,
     data.stop();  // EOF → déclenche le 226 côté serveur
 
     bool ok = (ftpReadCode(ctrl) == 226);
-    if (ok) webLogf("[FTP] %s → %s (%lu o) OK\n", fname, remoteDir, total);
-    else  { webLogf("[FTP] %s transfert incomplet\n", fname);
-            sdLogError("FTP", "%s transfert incomplet (%lu o)", fname, total); }
+    if (ok) webLogf("[FTP] %s → %s (%lu o) OK\n", remoteName, remoteDir, total);
+    else  { webLogf("[FTP] %s transfert incomplet\n", remoteName);
+            sdLogError("FTP", "%s transfert incomplet (%lu o)", remoteName, total); }
     return ok;
 }
 
+static bool ftpUploadFile(EthernetClient& ctrl, const char* fname,
+                          const char* remoteDir, IPAddress serverIP) {
+    return ftpUploadFileAs(ctrl, fname, fname, remoteDir, serverIP);
+}
+
 struct _FtpEntry { const char* suffix; const char* dir; };
-static const _FtpEntry _ftpMap[3] = {
-    { "CTD",  "/Data/CTD"  },
-    { "FLNTU","/Data/FLUO" },
-    { "SAMI", "/Data/SAMI" },
+static const _FtpEntry _ftpMap[4] = {
+    { "CTD",      "/Data/CTD"  },
+    { "FLNTU",    "/Data/FLUO" },
+    { "SAMI",     "/Data/SAMI" },
+    { "SAMI_RAW", "/Data/SAMI" },
 };
+static const uint8_t _ftpMapCount = sizeof(_ftpMap) / sizeof(_ftpMap[0]);
+
+// Retourne true si fname existe dans le répertoire distant (commande SIZE).
+// 213 = présent, 550 = absent, autre = serveur ne supporte pas SIZE → false.
+static bool ftpFileExists(EthernetClient& ctrl, const char* dir, const char* fname) {
+    if (!ftpCmd(ctrl, String("CWD ") + dir, 250)) return false;
+    ctrl.print("SIZE "); ctrl.print(fname); ctrl.print("\r\n");
+    return ftpReadCode(ctrl) == 213;
+}
+
+// Vérifie les FTP_NDAYS_CHECK derniers jours pour chaque capteur et renvoi
+// les fichiers présents sur SD mais absents du FTP.
+// Retourne le nombre de fichiers rattrapés.
+static uint8_t ftpCheckAndRepair(EthernetClient& ctrl, IPAddress serverIP, time_t now) {
+    uint8_t repaired = 0;
+    for (int d = 1; d <= FTP_NDAYS_CHECK; d++) {
+        time_t day = now - (time_t)d * 86400UL;
+        char dayStr[9];
+        strftime(dayStr, sizeof(dayStr), "%Y%m%d", gmtime(&day));
+
+        for (uint8_t i = 0; i < _ftpMapCount; i++) {
+            char fname[32];
+            snprintf(fname, sizeof(fname), "%s_EOL_%s.csv", dayStr, _ftpMap[i].suffix);
+
+            char sdPath[42];
+            snprintf(sdPath, sizeof(sdPath), "/data/%s", fname);
+            if (!SD.exists(sdPath)) continue;
+
+            if (ftpFileExists(ctrl, _ftpMap[i].dir, fname)) continue;
+
+            webLogf("[FTP] Rattrapage J-%d: %s\n", d, fname);
+            if (ftpUploadFile(ctrl, fname, _ftpMap[i].dir, serverIP)) repaired++;
+        }
+    }
+    return repaired;
+}
 
 uint8_t ftpUploadDaily() {
     time_t now = time(nullptr);
@@ -247,15 +292,35 @@ uint8_t ftpUploadDaily() {
     webLogln("[FTP] Connecte");
 
     uint8_t count = 0;
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < _ftpMapCount; i++) {
         char fname[32];
         snprintf(fname, sizeof(fname), "%s_EOL_%s.csv", date, _ftpMap[i].suffix);
         if (ftpUploadFile(ctrl, fname, _ftpMap[i].dir, serverIP)) count++;
     }
 
+    webLogf("[FTP] J-1 : %d/%d fichiers envoyes - verification %d derniers jours...\n",
+            count, _ftpMapCount, FTP_NDAYS_CHECK);
+    uint8_t repaired = ftpCheckAndRepair(ctrl, serverIP, now);
+    if (repaired > 0)
+        webLogf("[FTP] Rattrapage : %u fichier(s) manquant(s) renvoyes\n", repaired);
+    else
+        webLogln("[FTP] Verification N derniers jours : RAS");
+
+    // errors.log : nom distant date sur sa date de creation (et non celle du
+    // jour d'upload) pour ne jamais ecraser une version precedente sur le FTP
+    // apres une rotation (suppression locale > 50 Mo, cf. sdLogError).
+    if (SD.exists("/data/errors.log")) {
+        char createdDate[9];
+        if (!sdErrorsLogCreationDate(createdDate)) {
+            strftime(createdDate, sizeof(createdDate), "%Y%m%d", gmtime(&now));
+        }
+        char remoteName[24];
+        snprintf(remoteName, sizeof(remoteName), "%s_errors.log", createdDate);
+        ftpUploadFileAs(ctrl, "errors.log", remoteName, "/Data/LOG", serverIP);
+    }
+
     ftpCmd(ctrl, "QUIT", 221);
     ctrl.stop();
-    webLogf("[FTP] Termine : %d/3 fichiers envoyes\n", count);
     return count;
 }
 

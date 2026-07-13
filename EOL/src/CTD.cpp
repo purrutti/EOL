@@ -153,15 +153,17 @@ CTDData CTD::decode(const CTDRecord& record) {
     d.temperature  = fields[0];
     d.conductivity = fields[1];   // mS/cm
     if (n >= 3) d.oxygen   = fields[2];
-    if (n >= 4) d.pressure = fields[3];
+    if (n >= 4) d.salinity = fields[3];
+    //27.3034,  5.96724,  4.818,   37.9908,01 Jul 2026, 12:49:50
 
     parseDatetime(record.raw, d.date, d.hms);
-
+    /*
     if (d.conductivity > 0.0f) {
         d.salinity = (float)calculateSalinity(d.temperature,
                                                d.conductivity * 1000.0);
         d.valid = true;
-    }
+    }*/
+    d.valid = true;
     return d;
 }
 
