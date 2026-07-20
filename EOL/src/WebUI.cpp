@@ -148,7 +148,12 @@ static String buildFilesHtml() {
                 else            { html += sz;        html += F(" o"); }
                 html += F("</td><td><a href='/download?f=");
                 html += name;
-                html += F("'>&#11015; Telecharger</a></td></tr>");
+                html += F("'>&#11015; Telecharger</a> "
+                          "<a href='/delete?f=");
+                html += name;
+                html += F("' onclick=\"return confirm('Supprimer ");
+                html += name;
+                html += F(" ?')\" style='color:#c00'>&#128465; Supprimer</a></td></tr>");
             }
             f.close();
             f = dir.openNextFile();
@@ -212,6 +217,20 @@ static void handleDownload() {
     f.close();
 }
 
+static void handleDelete() {
+    if (!_srv.hasArg("f")) { _srv.send(400, "text/plain", "Parametre f manquant"); return; }
+    String fname = _srv.arg("f");
+    if (fname.indexOf("..") >= 0 || fname.indexOf('/') >= 0 || fname.indexOf('\\') >= 0) {
+        _srv.send(400, "text/plain", "Nom de fichier invalide"); return;
+    }
+    String path = "/data/" + fname;
+    if (!SD.exists(path.c_str()) ) { _srv.send(404, "text/plain", "Fichier introuvable"); return; }
+    bool ok = SD.remove(path.c_str());
+    webLogf("[Web] Suppression %s : %s\n", fname.c_str(), ok ? "OK" : "echec");
+    _srv.sendHeader("Location", "/files");
+    _srv.send(303);
+}
+
 static void handleUpdatePost() {
     bool ok = !Update.hasError();
     _srv.sendHeader("Connection", "close");
@@ -254,6 +273,7 @@ void webUIBegin(const char* ssid, const char* pass) {
     _srv.on("/",         HTTP_GET,  handleRoot);
     _srv.on("/files",    HTTP_GET,  handleFiles);
     _srv.on("/download", HTTP_GET,  handleDownload);
+    _srv.on("/delete",   HTTP_GET,  handleDelete);
     _srv.on("/update",   HTTP_GET,  handleUpdatePage);
     _srv.on("/update",   HTTP_POST, handleUpdatePost, handleUpload);
     _srv.onNotFound([]() { _srv.send(404, "text/plain", "Not found"); });
