@@ -6,8 +6,6 @@
 #include <RTClib.h>
 #include <SD.h>
 #include <sys/time.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 // ── RTC DS3231 ───────────────────────────────────────────────────────────────
 static RTC_DS3231 _rtc;
@@ -42,51 +40,32 @@ static IPAddress _ethDNS    (192, 168,   2,   1);
 static IPAddress _ethGW     (192, 168,   2,   1);
 static IPAddress _ethSubnet (255, 255, 255,   0);
 
-struct _NtpCtx {
-    uint32_t      timeoutMs;
-    volatile bool done;
-    volatile bool synced;
-};
-
-static void _ntpTask(void* pv) {
-    auto* ctx = (_NtpCtx*)pv;
-
-    //Ethernet.init(ETH_CS_PIN);
+void ethernetInit() {
     Ethernet.begin(_mac, _ethIP, _ethDNS, _ethGW, _ethSubnet);
-
-    EthernetUDP udp;
-    NTPClient   client(udp, "pool.ntp.org", 0, 0);
-    client.begin();
-
-    uint32_t t0 = millis();
-    while (millis() - t0 < ctx->timeoutMs) {
-        if (client.update()) {
-            unsigned long epoch = client.getEpochTime();
-            if (epoch > 1000000000UL) {
-                struct timeval tv = { (time_t)epoch, 0 };
-                settimeofday(&tv, nullptr);
-                ctx->synced = true;
-                break;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-    client.end();  // libère le socket UDP W5500 — vTaskDelete ne déclenche pas les destructeurs C++
-    ctx->done = true;
-    vTaskDelete(nullptr);
 }
 
-bool ethernetBegin(uint32_t timeoutMs) {
-    _NtpCtx ctx = { timeoutMs, false, false };
-    xTaskCreate(_ntpTask, "ntpSync", 8192, &ctx, 1, nullptr);
+// Confirme un epoch NTP par cohérence interne : exige deux lectures dont
+// l'écart correspond à l'écart de temps écoulé (à qqs secondes près). Un seul
+// paquet UDP corrompu (constaté en pratique : "NTP OK" avec une date ~10 ans
+// dans le futur) ne peut pas reproduire cette cohérence et est donc rejeté.
+// Volontairement indépendant du RTC, qui peut déjà être corrompu par une
+// contamination antérieure — sinon on resterait bloqué à rejeter toute heure
+// correcte qui diverge du RTC corrompu.
+#define NTP_CONFIRM_TOLERANCE_S 5UL
 
-    // delay(100) cède le CPU aux idle tasks → watchdog nourri pendant la requête NTP
-    uint32_t deadline = millis() + timeoutMs + 3000;
-    while (!ctx.done && millis() < deadline) {
-        delay(100);
+static bool ntpConfirm(uint32_t epoch, uint32_t& prevEpoch, uint32_t& prevMillis) {
+    uint32_t nowMs = millis();
+    bool ok = false;
+    if (prevEpoch != 0) {
+        uint32_t elapsedS = (nowMs - prevMillis) / 1000UL;
+        uint32_t expected = prevEpoch + elapsedS;
+        uint32_t diff = (expected > epoch) ? (expected - epoch) : (epoch - expected);
+        ok = diff <= NTP_CONFIRM_TOLERANCE_S;
+        if (!ok) sdLogError("NTP", "epoch incoherent rejete (%lu vs %lu attendu)", epoch, expected);
     }
-    if (ctx.synced) rtcSetFromSystem();
-    return ctx.synced;
+    prevEpoch  = epoch;
+    prevMillis = nowMs;
+    return ok;
 }
 
 // ── FTP upload ────────────────────────────────────────────────────────────────
@@ -100,6 +79,11 @@ bool ethernetBegin(uint32_t timeoutMs) {
 extern void webLogf(const char* fmt, ...);
 extern void webLogln(const char* msg);
 
+// Un timeout ici (-1) arrete la connexion : sans ca, chaque commande suivante
+// sur une session devenue muette rattendrait bêtement FTP_TOUT_MS a son tour
+// (jusqu'a ~45 commandes dans ftpUploadDaily -> ~10 min de blocage total du
+// loop() non-bloquant). Avec ctrl.stop(), .connected() passe a false et les
+// boucles appelantes peuvent sortir immediatement au lieu de re-attendre.
 static int ftpReadCode(EthernetClient& c, String* lineOut = nullptr) {
     uint32_t t0 = millis();
     while (millis() - t0 < FTP_TOUT_MS) {
@@ -110,8 +94,10 @@ static int ftpReadCode(EthernetClient& c, String* lineOut = nullptr) {
             if (lineOut) *lineOut = line;
             return line.substring(0, 3).toInt();
         }
+        if (!c.connected()) break;  // deja fermee, inutile d'attendre le timeout
         delay(20);
     }
+    c.stop();
     return -1;
 }
 
@@ -231,12 +217,12 @@ static bool ftpFileExists(EthernetClient& ctrl, const char* dir, const char* fna
 // Retourne le nombre de fichiers rattrapés.
 static uint8_t ftpCheckAndRepair(EthernetClient& ctrl, IPAddress serverIP, time_t now) {
     uint8_t repaired = 0;
-    for (int d = 1; d <= FTP_NDAYS_CHECK; d++) {
+    for (int d = 1; d <= FTP_NDAYS_CHECK && ctrl.connected(); d++) {
         time_t day = now - (time_t)d * 86400UL;
         char dayStr[9];
         strftime(dayStr, sizeof(dayStr), "%Y%m%d", gmtime(&day));
 
-        for (uint8_t i = 0; i < _ftpMapCount; i++) {
+        for (uint8_t i = 0; i < _ftpMapCount && ctrl.connected(); i++) {
             char fname[32];
             snprintf(fname, sizeof(fname), "%s_EOL_%s.csv", dayStr, _ftpMap[i].suffix);
 
@@ -250,6 +236,8 @@ static uint8_t ftpCheckAndRepair(EthernetClient& ctrl, IPAddress serverIP, time_
             if (ftpUploadFile(ctrl, fname, _ftpMap[i].dir, serverIP)) repaired++;
         }
     }
+    if (!ctrl.connected())
+        sdLogError("FTP", "connexion perdue - rattrapage interrompu");
     return repaired;
 }
 
@@ -292,7 +280,7 @@ uint8_t ftpUploadDaily() {
     webLogln("[FTP] Connecte");
 
     uint8_t count = 0;
-    for (uint8_t i = 0; i < _ftpMapCount; i++) {
+    for (uint8_t i = 0; i < _ftpMapCount && ctrl.connected(); i++) {
         char fname[32];
         snprintf(fname, sizeof(fname), "%s_EOL_%s.csv", date, _ftpMap[i].suffix);
         if (ftpUploadFile(ctrl, fname, _ftpMap[i].dir, serverIP)) count++;
@@ -300,16 +288,16 @@ uint8_t ftpUploadDaily() {
 
     webLogf("[FTP] J-1 : %d/%d fichiers envoyes - verification %d derniers jours...\n",
             count, _ftpMapCount, FTP_NDAYS_CHECK);
-    uint8_t repaired = ftpCheckAndRepair(ctrl, serverIP, now);
+    uint8_t repaired = ctrl.connected() ? ftpCheckAndRepair(ctrl, serverIP, now) : 0;
     if (repaired > 0)
         webLogf("[FTP] Rattrapage : %u fichier(s) manquant(s) renvoyes\n", repaired);
-    else
+    else if (ctrl.connected())
         webLogln("[FTP] Verification N derniers jours : RAS");
 
     // errors.log : nom distant date sur sa date de creation (et non celle du
     // jour d'upload) pour ne jamais ecraser une version precedente sur le FTP
     // apres une rotation (suppression locale > 50 Mo, cf. sdLogError).
-    if (SD.exists("/data/errors.log")) {
+    if (ctrl.connected() && SD.exists("/data/errors.log")) {
         char createdDate[9];
         if (!sdErrorsLogCreationDate(createdDate)) {
             strftime(createdDate, sizeof(createdDate), "%Y%m%d", gmtime(&now));
@@ -327,13 +315,20 @@ uint8_t ftpUploadDaily() {
 // ── NTP session non-bloquante ─────────────────────────────────────────────────
 static EthernetUDP _sessUdp;
 static NTPClient   _sessCli(_sessUdp, "pool.ntp.org", 0, 0);
+static uint32_t    _sessPrevEpoch  = 0;
+static uint32_t    _sessPrevMillis = 0;
 
-void ntpSessionBegin() { _sessCli.begin(); }
+void ntpSessionBegin() {
+    _sessCli.begin();
+    _sessPrevEpoch  = 0;   // nouvelle session : pas de confirmation heritee de la veille
+    _sessPrevMillis = 0;
+}
 
 bool ntpSessionPoll() {
     if (!_sessCli.update()) return false;
     unsigned long e = _sessCli.getEpochTime();
     if (e < 1000000000UL) return false;
+    if (!ntpConfirm((uint32_t)e, _sessPrevEpoch, _sessPrevMillis)) return false;
     struct timeval tv = { (time_t)e, 0 };
     settimeofday(&tv, nullptr);
     rtcSetFromSystem();

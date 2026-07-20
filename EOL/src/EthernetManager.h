@@ -2,10 +2,11 @@
 #include <Arduino.h>
 
 // ── Ethernet ──────────────────────────────────────────────────────────────────
-// Initialise l'interface W5500 (IP fixe 192.168.2.231) et synchronise
-// l'horloge système via NTP (UTC). Met à jour le RTC si la sync réussit.
-// Appel bloquant jusqu'à timeoutMs. Retourne true si NTP OK.
-bool ethernetBegin(uint32_t timeoutMs = 20000UL);
+// Initialise l'interface W5500 (IP fixe 192.168.2.231). Rapide, ne tente pas
+// de NTP — la sync horaire se fait plus tard via ntpSessionBegin/Poll/End,
+// après le premier cycle de mesures, pour laisser au modem GSM le temps
+// d'établir sa connexion avant le premier essai.
+void ethernetInit();
 
 // ── RTC DS3231 ────────────────────────────────────────────────────────────────
 bool rtcBegin();           // Initialise le DS3231 via I2C

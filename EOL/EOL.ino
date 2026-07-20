@@ -132,7 +132,7 @@ void setup() {
     pinMode(PISAMI_RELAY_PIN, OUTPUT);
     pinMode(CTD_RELAY_PIN,    OUTPUT);
     pinMode(FLNTU_RELAY_PIN,  OUTPUT);
-    digitalWrite(GSM_RELAY_PIN,    HIGH);  // modem GSM éteint au démarrage
+    digitalWrite(GSM_RELAY_PIN,    LOW);   // modem GSM allumé au démarrage - laisse le temps d'etablir la connexion avant le 1er cycle FTP
     digitalWrite(PISAMI_RELAY_PIN, LOW);
     digitalWrite(CTD_RELAY_PIN,    LOW);
     digitalWrite(FLNTU_RELAY_PIN,  LOW);
@@ -183,31 +183,26 @@ void setup() {
     webLogln(sdLoggerBegin() ? "OK" : "FAILED (pas de carte ?)");
     sdLogError("BOOT", "redemarrage - raison: %s", resetReasonStr(esp_reset_reason()));
 
-    // ── RTC init ──
+    // ── RTC init + restauration heure ──
     webLog("[INIT] RTC (DS3231)... ");
     bool rtcOk = rtcBegin();
     webLogln(rtcOk ? "OK" : "FAILED");
-
-    // ── Ethernet : IP fixe + NTP + RTC ──
-    webLog("[INIT] Ethernet + NTP... ");
-    bool ntpOk = ethernetBegin(20000);
-    if (ntpOk) {
+    if (rtcOk && rtcSyncToSystem()) {
         time_t now = time(nullptr);
         char buf[24];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmtime(&now));
-        webLogf("OK [%s UTC]\n", buf);
-        if (rtcOk) webLogln("[RTC] Mis a jour depuis NTP");
-    } else {
-        webLogln("FAILED (Ethernet ou routeur indisponible)");
-        if (rtcOk && rtcSyncToSystem()) {
-            time_t now = time(nullptr);
-            char buf[24];
-            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmtime(&now));
-            webLogf("[RTC] Heure restauree depuis RTC [%s UTC]\n", buf);
-        } else if (rtcOk) {
-            webLogln("[RTC] Heure invalide (RTC jamais sync)");
-        }
+        webLogf("[RTC] Heure restauree [%s UTC]\n", buf);
+    } else if (rtcOk) {
+        webLogln("[RTC] Heure invalide (RTC jamais sync)");
     }
+
+    // ── Ethernet : IP fixe uniquement — le NTP est tente plus tard dans la
+    // machine a etats, apres le 1er cycle de mesures (cf. S_IDLE), pour
+    // laisser au modem GSM (allume depuis le debut du setup) le temps
+    // d'etablir sa connexion avant le premier essai.
+    webLog("[INIT] Ethernet... ");
+    ethernetInit();
+    webLogln("OK");
 
     // ── Serveur web Ethernet (démarre si DHCP a fourni une IP) ──
     webUIEthernetBegin();
@@ -258,13 +253,10 @@ void loop() {
 
     // ── Attente du prochain cycle ─────────────────────────────────────────────
     case S_IDLE:
-        if (ftpDue()) {
-            webLogln("[FTP] Creneau d'envoi - activation modem GSM...");
-            digitalWrite(GSM_RELAY_PIN, LOW);  // modem ON
-            _ftpStateT0 = millis();
-            loopState = S_FTP_GSM_ON;
-            break;
-        }
+        // Priorite aux mesures : au boot, mesures et FTP sont typiquement dus
+        // en meme temps, et faire les mesures d'abord laisse au modem GSM
+        // (allume depuis le setup) le temps d'etablir sa connexion avant le
+        // premier essai NTP/FTP.
         if (measDue()) {
             _lastMeasTime = lastMeasSlot();
             nextCycle = millis() + MEAS_INTERVAL_MS;  // fallback si perte d'horloge
@@ -277,6 +269,13 @@ void loop() {
             digitalWrite(CTD_RELAY_PIN,    HIGH);
             settleT0 = millis();
             loopState = S_CTD_SETTLE;
+            break;
+        }
+        if (ftpDue()) {
+            webLogln("[FTP] Creneau d'envoi - activation modem GSM...");
+            digitalWrite(GSM_RELAY_PIN, LOW);  // modem ON (deja allume au boot, sans effet sinon)
+            _ftpStateT0 = millis();
+            loopState = S_FTP_GSM_ON;
         }
         break;
 
@@ -467,7 +466,7 @@ void loop() {
         }
         if (millis() - _ftpStateT0 >= NTP_TIMEOUT_MS) {
             ntpSessionEnd();
-            webLogln("[FTP] Timeout NTP - modem GSM eteint");
+            webLogln("[FTP] Timeout NTP - modem GSM reste allumé");
             sdLogError("FTP", "timeout NTP - upload annule");
             _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
             //digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF
@@ -483,9 +482,10 @@ void loop() {
             webLogf("[FTP] %u/3 fichiers envoyes - modem GSM eteint\n", sent);
             digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF 
         } else {
-            webLogln("[FTP] Echec upload - retry dans 15 min");
+            webLogln("[FTP] Echec upload - retry dans 15 min - modem GSM eteint");
             sdLogError("FTP", "upload echoue (0/3)");
             _ftpRetryAfter = millis() + 15UL * 60UL * 1000UL;
+            digitalWrite(GSM_RELAY_PIN, HIGH);  // modem OFF
         }
         
         loopState = S_IDLE;
